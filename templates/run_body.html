@@ -16,7 +16,13 @@
   {% if !run.branch.is_empty() %}<span><strong>branch</strong> <code>{{ run.branch }}</code></span>{% endif %}
   {% if !run.commit_sha.is_empty() %}<span><strong>commit</strong> <code>{{ run.commit_sha }}</code></span>{% endif %}
   {% if !run.env.is_empty() %}<span><strong>env</strong> <code>{{ run.env }}</code></span>{% endif %}
-  {% if !run.url.is_empty() %}<span><strong>url</strong> <a href="{{ run.url }}" target="_blank">{{ run.url }}</a></span>{% endif %}
+  {% if !run.url.is_empty() %}<span><strong>url</strong>
+    {% if run.url_is_safe() %}
+      <a href="{{ run.url }}" target="_blank" rel="noopener noreferrer">{{ run.url }}</a>
+    {% else %}
+      <code title="non-http(s) URL — not made clickable">{{ run.url }}</code>
+    {% endif %}
+  </span>{% endif %}
 </div>
 {% endif %}
 

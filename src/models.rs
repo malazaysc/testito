@@ -117,6 +117,35 @@ impl Run {
             || !self.env.is_empty()
             || !self.url.is_empty()
     }
+
+    /// True only when `self.url` is safe to render as a clickable `<a href>`.
+    /// Agent-controlled, so we accept only http(s) — never `javascript:`,
+    /// `data:`, or anything else that could execute on click.
+    pub fn url_is_safe(&self) -> bool {
+        is_http_url(&self.url)
+    }
+}
+
+fn is_http_url(url: &str) -> bool {
+    let trimmed = url.trim_start();
+    if trimmed.is_empty() {
+        return false;
+    }
+    // Strip ASCII whitespace and control chars before the colon, like browsers do,
+    // so e.g. `http\t://` doesn't leak through against a stricter scheme check.
+    let mut scheme = String::new();
+    let mut found_colon = false;
+    for &b in trimmed.as_bytes() {
+        if b == b':' {
+            found_colon = true;
+            break;
+        }
+        if (b as char).is_ascii_whitespace() || b.is_ascii_control() {
+            continue;
+        }
+        scheme.push(b.to_ascii_lowercase() as char);
+    }
+    found_colon && (scheme == "http" || scheme == "https")
 }
 
 #[derive(Debug, Clone)]
@@ -342,5 +371,52 @@ mod tests {
     fn relative_time_future_is_just_now() {
         let t = chrono::Utc::now() + chrono::Duration::seconds(30);
         assert_eq!(relative_time(&t.to_rfc3339()), "just now");
+    }
+
+    fn run_with_url(url: &str) -> Run {
+        Run {
+            id: 0,
+            name: String::new(),
+            description: String::new(),
+            branch: String::new(),
+            commit_sha: String::new(),
+            env: String::new(),
+            url: url.to_string(),
+            started_at: String::new(),
+            completed_at: None,
+            test_count: 0,
+            step_count: 0,
+            note_count: 0,
+        }
+    }
+
+    #[test]
+    fn url_is_safe_accepts_http_https_only() {
+        for u in ["http://x", "https://x", "HTTP://x", "Https://x"] {
+            assert!(run_with_url(u).url_is_safe(), "expected safe: {u}");
+        }
+    }
+
+    #[test]
+    fn url_is_safe_rejects_dangerous_schemes() {
+        for u in [
+            "javascript:alert(1)",
+            "JavaScript:alert(1)",
+            "  javascript:alert(1)",
+            "java\tscript:alert(1)",
+            "java\nscript:alert(1)",
+            "data:text/html,<script>alert(1)</script>",
+            "vbscript:msgbox(1)",
+            "ftp://x",
+            "ssh://x",
+            "file:///etc/passwd",
+            "",
+            "   ",
+            "/relative", // relative is fine, but not as a clickable agent-supplied URL
+            "#fragment",
+            "javascript", // no colon, also not a usable URL
+        ] {
+            assert!(!run_with_url(u).url_is_safe(), "expected unsafe: {u:?}");
+        }
     }
 }
