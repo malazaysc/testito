@@ -23,18 +23,27 @@
 {% if rows.is_empty() %}
   <div class="card"><p class="muted">Neither run has any tests yet.</p></div>
 {% else %}
-<table>
+<p class="muted" style="margin: 0 0 0.5rem 0;">Click a test to see its step-level diff.</p>
+<table class="compare-table">
   <thead>
     <tr>
+      <th></th>
       <th>Test</th>
       <th>A: {{ a.name }}</th>
       <th>B: {{ b.name }}</th>
       <th>Diff</th>
     </tr>
   </thead>
-  <tbody>
-    {% for row in rows %}
-    <tr {% if row.differs %}class="diff-row"{% endif %}>
+  {% for row in rows %}
+  <tbody x-data="{ open: false }">
+    <tr {% if row.differs %}class="diff-row"{% endif %}
+        @click="open = !open"
+        hx-get="/compare/test?a={{ a.id }}&b={{ b.id }}&test={{ row.test_name_encoded }}"
+        hx-target="#compare-detail-{{ loop.index }}"
+        hx-swap="innerHTML"
+        hx-trigger="click once"
+        style="cursor: pointer;">
+      <td><span class="caret" :class="{ 'open': open }">▸</span></td>
       <td>{{ row.test_name }}</td>
       <td>
         {% match row.a_status %}
@@ -50,8 +59,13 @@
       </td>
       <td>{% if row.differs %}<span class="pill pill-warning">changed</span>{% else %}<span class="muted">·</span>{% endif %}</td>
     </tr>
-    {% endfor %}
+    <tr class="compare-detail-row" x-show="open" x-cloak>
+      <td colspan="5" id="compare-detail-{{ loop.index }}">
+        <span class="muted">Loading…</span>
+      </td>
+    </tr>
   </tbody>
+  {% endfor %}
 </table>
 {% endif %}
 

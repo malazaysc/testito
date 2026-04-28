@@ -21,6 +21,7 @@ pub fn router(state: AppState) -> Router {
         .route("/runs/:id/body", get(run_body_fragment))
         .route("/runs/:id/export.md", get(export_markdown))
         .route("/compare", get(compare_page))
+        .route("/compare/test", get(compare_test_fragment))
         .with_state(state)
 }
 
@@ -155,8 +156,24 @@ struct CompareTpl {
 
 struct CompareRow {
     test_name: String,
+    test_name_encoded: String,
     a_status: Option<TestResult>,
     b_status: Option<TestResult>,
+    differs: bool,
+}
+
+#[derive(Template)]
+#[template(path = "compare_test.html")]
+struct CompareTestTpl {
+    rows: Vec<StepDiffRow>,
+}
+
+struct StepDiffRow {
+    name: String,
+    a_status: Option<TestResult>,
+    b_status: Option<TestResult>,
+    a_attempt: i64, // 0 = step did not exist on this side
+    b_attempt: i64,
     differs: bool,
 }
 
@@ -470,9 +487,11 @@ async fn compare_page(
         .map(|name| {
             let a_status = a_map.get(&name).copied().flatten();
             let b_status = b_map.get(&name).copied().flatten();
+            let test_name_encoded = urlencoding::encode(&name).into_owned();
             CompareRow {
                 differs: a_status != b_status,
                 test_name: name,
+                test_name_encoded,
                 a_status,
                 b_status,
             }
@@ -501,9 +520,155 @@ fn test_rollups(
     Ok(out)
 }
 
+#[derive(Deserialize)]
+struct CompareTestQuery {
+    a: i64,
+    b: i64,
+    test: String,
+}
+
+async fn compare_test_fragment(
+    State(state): State<AppState>,
+    Query(q): Query<CompareTestQuery>,
+) -> Result<impl IntoResponse, AppError> {
+    let db = state.db.lock().await;
+    let a_steps = steps_for_named_test(&db, q.a, &q.test)?;
+    let b_steps = steps_for_named_test(&db, q.b, &q.test)?;
+    let rows = step_diff_rows(&a_steps, &b_steps);
+    Ok(render(CompareTestTpl { rows }))
+}
+
+/// Look up the run-test row by `(run_id, name)` and return its raw step rows
+/// (all attempts). Returns an empty Vec if the test does not exist in the run.
+fn steps_for_named_test(
+    db: &crate::db::Db,
+    run_id: i64,
+    name: &str,
+) -> anyhow::Result<Vec<RunStep>> {
+    for t in db.run_tests(run_id)? {
+        if t.name == name {
+            return db.steps_for_test(t.id);
+        }
+    }
+    Ok(Vec::new())
+}
+
+/// Merge step rows from two runs of the same logical test, comparing the
+/// latest attempt of each step name. Returns one row per distinct step name.
+fn step_diff_rows(a: &[RunStep], b: &[RunStep]) -> Vec<StepDiffRow> {
+    use std::collections::BTreeMap;
+
+    fn latest_by_name(steps: &[RunStep]) -> BTreeMap<&str, &RunStep> {
+        let mut out: BTreeMap<&str, &RunStep> = BTreeMap::new();
+        for s in steps {
+            match out.get(s.name.as_str()) {
+                Some(existing) if existing.attempt >= s.attempt => {}
+                _ => {
+                    out.insert(&s.name, s);
+                }
+            }
+        }
+        out
+    }
+
+    let a_latest = latest_by_name(a);
+    let b_latest = latest_by_name(b);
+    let mut names: std::collections::BTreeSet<&str> = a_latest.keys().copied().collect();
+    names.extend(b_latest.keys().copied());
+
+    names
+        .into_iter()
+        .map(|name| {
+            let a_step = a_latest.get(name).copied();
+            let b_step = b_latest.get(name).copied();
+            let a_status = a_step.map(|s| s.result);
+            let b_status = b_step.map(|s| s.result);
+            StepDiffRow {
+                name: name.to_string(),
+                a_attempt: a_step.map(|s| s.attempt).unwrap_or(0),
+                b_attempt: b_step.map(|s| s.attempt).unwrap_or(0),
+                differs: a_status != b_status,
+                a_status,
+                b_status,
+            }
+        })
+        .collect()
+}
+
 fn render<T: Template>(t: T) -> Html<String> {
     match t.render() {
         Ok(s) => Html(s),
         Err(e) => Html(format!("<pre>template error: {}</pre>", e)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{step_diff_rows, RunStep};
+    use crate::models::Result as TestResult;
+
+    fn step(name: &str, attempt: i64, result: TestResult) -> RunStep {
+        RunStep {
+            id: 0,
+            run_test_id: 0,
+            name: name.to_string(),
+            attempt,
+            result,
+            note: String::new(),
+            reported_at: String::new(),
+        }
+    }
+
+    #[test]
+    fn step_diff_uses_latest_attempt_per_side() {
+        // A: submit fail → pass. B: submit pass.
+        // Latest on both sides is Pass → not a diff.
+        let a = vec![
+            step("submit", 1, TestResult::Fail),
+            step("submit", 2, TestResult::Pass),
+        ];
+        let b = vec![step("submit", 1, TestResult::Pass)];
+        let rows = step_diff_rows(&a, &b);
+        assert_eq!(rows.len(), 1);
+        let r = &rows[0];
+        assert_eq!(r.name, "submit");
+        assert_eq!(r.a_status, Some(TestResult::Pass));
+        assert_eq!(r.b_status, Some(TestResult::Pass));
+        assert_eq!(r.a_attempt, 2);
+        assert_eq!(r.b_attempt, 1);
+        assert!(!r.differs);
+    }
+
+    #[test]
+    fn step_diff_marks_one_sided_steps() {
+        let a = vec![step("only-a", 1, TestResult::Pass)];
+        let b = vec![step("only-b", 1, TestResult::Pass)];
+        let rows = step_diff_rows(&a, &b);
+        assert_eq!(rows.len(), 2);
+        let row_a = rows.iter().find(|r| r.name == "only-a").unwrap();
+        assert_eq!(row_a.a_status, Some(TestResult::Pass));
+        assert_eq!(row_a.b_status, None);
+        assert_eq!(row_a.b_attempt, 0);
+        assert!(row_a.differs);
+        let row_b = rows.iter().find(|r| r.name == "only-b").unwrap();
+        assert_eq!(row_b.a_status, None);
+        assert_eq!(row_b.a_attempt, 0);
+        assert_eq!(row_b.b_status, Some(TestResult::Pass));
+        assert!(row_b.differs);
+    }
+
+    #[test]
+    fn step_diff_flags_status_change() {
+        let a = vec![step("nav", 1, TestResult::Warning)];
+        let b = vec![step("nav", 1, TestResult::Pass)];
+        let rows = step_diff_rows(&a, &b);
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].differs);
+    }
+
+    #[test]
+    fn step_diff_empty_both_sides() {
+        let rows = step_diff_rows(&[], &[]);
+        assert!(rows.is_empty());
     }
 }

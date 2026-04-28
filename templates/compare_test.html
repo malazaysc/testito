@@ -1,0 +1,35 @@
+{% if rows.is_empty() %}
+  <p class="muted" style="margin: 0.5rem 0;">This test has no steps in either run.</p>
+{% else %}
+  <table class="step-diff-table">
+    <thead>
+      <tr><th>Step</th><th>A</th><th>B</th><th>Diff</th></tr>
+    </thead>
+    <tbody>
+      {% for row in rows %}
+        <tr {% if row.differs %}class="diff-row"{% endif %}>
+          <td>{{ row.name }}</td>
+          <td>
+            {% match row.a_status %}
+              {% when Some with (s) %}
+                <span class="pill pill-{{ s.as_str() }}">{{ s.label() }}</span>
+                {% if row.a_attempt > 1 %}<span class="muted" style="font-size: 0.75rem;">try #{{ row.a_attempt }}</span>{% endif %}
+              {% when None %}
+                <span class="muted">—</span>
+            {% endmatch %}
+          </td>
+          <td>
+            {% match row.b_status %}
+              {% when Some with (s) %}
+                <span class="pill pill-{{ s.as_str() }}">{{ s.label() }}</span>
+                {% if row.b_attempt > 1 %}<span class="muted" style="font-size: 0.75rem;">try #{{ row.b_attempt }}</span>{% endif %}
+              {% when None %}
+                <span class="muted">—</span>
+            {% endmatch %}
+          </td>
+          <td>{% if row.differs %}<span class="pill pill-warning">changed</span>{% else %}<span class="muted">·</span>{% endif %}</td>
+        </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+{% endif %}
