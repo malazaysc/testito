@@ -20,9 +20,9 @@ jobs:
           - target: aarch64-apple-darwin
             os: macos-14
             suffix: macos-aarch64
-          - target: x86_64-apple-darwin
-            os: macos-13
-            suffix: macos-x86_64
+          # x86_64 mac dropped from the matrix — macos-13 free-tier runners
+          # are scarce and routinely queue for 30+ minutes. Intel Mac users
+          # can `cargo build --release` from source in ~30s.
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
