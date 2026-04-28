@@ -5,6 +5,7 @@
       <th>Branch / Env</th>
       <th>Tests</th>
       <th>Counts</th>
+      <th>Findings</th>
       <th>Started</th>
       <th>Status</th>
       <th></th>
@@ -36,6 +37,13 @@
         {% if r.counts.fail    > 0 %}<span class="pill pill-fail">{{ r.counts.fail }}F</span>{% endif %}
         {% if r.counts.warning > 0 %}<span class="pill pill-warning">{{ r.counts.warning }}W</span>{% endif %}
         {% if r.counts.skipped > 0 %}<span class="pill pill-skipped">{{ r.counts.skipped }}S</span>{% endif %}
+      </td>
+      <td>
+        {% if r.findings > 0 %}
+          <a href="/runs/{{ r.run.id }}#findings" class="pill pill-findings" title="Click to review">📋 {{ r.findings }}</a>
+        {% else %}
+          <span class="muted">·</span>
+        {% endif %}
       </td>
       <td class="muted" title="{{ r.run.started_at }}">{{ r.relative_started }}</td>
       <td>

@@ -367,7 +367,34 @@ fn cmd_end(db_path: PathBuf, a: EndArgs) -> Result<()> {
     db.complete_run(run_id)?;
     let run_rollup = compute_run_rollup(&db, run_id)?;
     let status = run_rollup.map(|r| r.label()).unwrap_or("no steps reported");
-    println!("run {} completed · {}", a.run, status);
+
+    // Soft nudge before exiting if the agent didn't file any tangential
+    // observations. Counts out-of-scope notes only — those are the ones
+    // agents most often elide.
+    let findings = db
+        .notes_for_run(run_id)?
+        .into_iter()
+        .filter(|n| n.scope == Scope::Out)
+        .count();
+    if findings == 0 {
+        eprintln!();
+        eprintln!("⚠  You filed 0 out-of-scope observations on this run.");
+        eprintln!(
+            "   Did you really see nothing tangential — typos, slow loads, console warnings,"
+        );
+        eprintln!("   layout quirks, surprises? If you did, run:");
+        eprintln!("     testito jot --run \"{}\" --text \"...\"", a.run);
+        eprintln!("   Filing has zero cost; silence has real cost (the user has to ask again).");
+        eprintln!();
+    }
+
+    println!(
+        "run {} completed · {} · 📋 {} finding{}",
+        a.run,
+        status,
+        findings,
+        if findings == 1 { "" } else { "s" }
+    );
     if a.fail_if_failures && run_rollup == Some(TestResult::Fail) {
         // Distinct exit code so callers can branch on "test failure" vs "tool error".
         std::process::exit(1);
@@ -566,8 +593,40 @@ fn cmd_show(db_path: PathBuf, a: ShowArgs) -> Result<()> {
         "Counts: {} pass · {} fail · {} warn · {} skip",
         counts.0, counts.1, counts.2, counts.3
     );
+    let findings = notes.iter().filter(|n| n.scope == Scope::Out).count();
+    if findings > 0 {
+        println!(
+            "Findings: 📋 {} observation{} filed outside the test brief — review them.",
+            findings,
+            if findings == 1 { "" } else { "s" }
+        );
+    } else {
+        println!("Findings: ✓ none filed");
+    }
 
-    // Failures section first — that's the part you actually care about
+    // Findings & notes — surfaced before the long test list because the agent's
+    // tangential observations are usually what the human actually wants to read.
+    if !notes.is_empty() {
+        println!();
+        println!("Findings & notes:");
+        for n in &notes {
+            let tag = match n.scope {
+                Scope::In => "[in] ",
+                Scope::Out => "[out]",
+            };
+            print!("  {tag} ");
+            let mut lines = n.text.lines();
+            if let Some(first) = lines.next() {
+                println!("{first}");
+            } else {
+                println!();
+            }
+            for line in lines {
+                println!("        {line}");
+            }
+        }
+    }
+
     let failing_steps: Vec<_> = tests_with_steps
         .iter()
         .flat_map(|(t, steps, _)| {
@@ -610,28 +669,6 @@ fn cmd_show(db_path: PathBuf, a: ShowArgs) -> Result<()> {
             steps.len(),
             if steps.len() == 1 { "" } else { "s" }
         );
-    }
-
-    if !notes.is_empty() {
-        println!();
-        println!("Notes:");
-        for n in &notes {
-            let tag = match n.scope {
-                Scope::In => "[in] ",
-                Scope::Out => "[out]",
-            };
-            print!("  {tag} ");
-            // Indent multi-line notes so they read clearly under the tag
-            let mut lines = n.text.lines();
-            if let Some(first) = lines.next() {
-                println!("{first}");
-            } else {
-                println!();
-            }
-            for line in lines {
-                println!("        {line}");
-            }
-        }
     }
 
     Ok(())

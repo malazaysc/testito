@@ -65,6 +65,9 @@ struct RunRow {
     relative_started: String,
     rollup: Option<TestResult>,
     counts: ResultCounts,
+    /// Out-of-scope notes — surfaced prominently on the home table because
+    /// they're usually the agent's tangential bug findings.
+    findings: i64,
 }
 
 #[derive(Default, Clone)]
@@ -131,6 +134,7 @@ struct RunTpl {
     counts: ResultCounts,
     rollup: Option<TestResult>,
     other_runs: Vec<Run>,
+    findings: i64,
 }
 
 #[derive(Template)]
@@ -143,6 +147,7 @@ struct RunBodyTpl {
     notes: Vec<NoteRow>,
     counts: ResultCounts,
     rollup: Option<TestResult>,
+    findings: i64,
 }
 
 #[derive(Template)]
@@ -204,11 +209,17 @@ async fn build_run_rows(state: &AppState) -> Result<Vec<RunRow>, AppError> {
         }
         let rollup = rollup(&all_steps);
         let relative_started = relative_time(&r.started_at);
+        let findings = db
+            .notes_for_run(r.id)?
+            .into_iter()
+            .filter(|n| matches!(n.scope, crate::models::Scope::Out))
+            .count() as i64;
         out.push(RunRow {
             run: r,
             relative_started,
             rollup,
             counts,
+            findings,
         });
     }
     Ok(out)
@@ -235,6 +246,7 @@ async fn run_page(
         counts: body.counts,
         rollup: body.rollup,
         other_runs,
+        findings: body.findings,
     }))
 }
 
@@ -295,6 +307,10 @@ async fn build_run_body(state: &AppState, id: i64) -> Result<RunBodyTpl, AppErro
     }
 
     let notes_raw = db.notes_for_run(id)?;
+    let findings = notes_raw
+        .iter()
+        .filter(|n| matches!(n.scope, crate::models::Scope::Out))
+        .count() as i64;
     let notes: Vec<NoteRow> = notes_raw
         .into_iter()
         .map(|n| NoteRow {
@@ -314,6 +330,7 @@ async fn build_run_body(state: &AppState, id: i64) -> Result<RunBodyTpl, AppErro
         notes,
         counts,
         rollup: run_rollup,
+        findings,
     })
 }
 
@@ -375,11 +392,37 @@ fn render_markdown_export(b: &RunBodyTpl) -> String {
         s.push_str(&format!("- **Rollup**: {}\n", r.label()));
     }
     s.push_str(&format!(
-        "- **Counts**: {} pass · {} fail · {} warn · {} skip\n\n",
+        "- **Counts**: {} pass · {} fail · {} warn · {} skip\n",
         b.counts.pass, b.counts.fail, b.counts.warning, b.counts.skipped
     ));
+    if b.findings > 0 {
+        s.push_str(&format!(
+            "- **Findings**: 📋 {} observation{} filed outside the test brief — review them.\n",
+            b.findings,
+            if b.findings == 1 { "" } else { "s" }
+        ));
+    }
+    s.push('\n');
 
-    // Failures first
+    // Findings & notes — surfaced before tests because they're usually what
+    // the human reviewer should read first.
+    if !b.notes.is_empty() {
+        s.push_str(&format!("## Findings & notes ({})\n\n", b.notes.len()));
+        for n in &b.notes {
+            let scope = match n.note.scope {
+                crate::models::Scope::In => "in scope",
+                crate::models::Scope::Out => "out of scope",
+            };
+            s.push_str(&format!(
+                "- _({})_ {}\n",
+                scope,
+                n.note.text.replace('\n', "\n    ")
+            ));
+        }
+        s.push('\n');
+    }
+
+    // Failures
     let mut has_failures = false;
     for t in &b.tests {
         for sr in &t.steps {
@@ -439,22 +482,6 @@ fn render_markdown_export(b: &RunBodyTpl) -> String {
         s.push('\n');
     }
 
-    // Notes
-    if !b.notes.is_empty() {
-        s.push_str("## Notes\n\n");
-        for n in &b.notes {
-            let scope = match n.note.scope {
-                crate::models::Scope::In => "in scope",
-                crate::models::Scope::Out => "out of scope",
-            };
-            s.push_str(&format!(
-                "- _({})_ {}\n",
-                scope,
-                n.note.text.replace('\n', "\n    ")
-            ));
-        }
-        s.push('\n');
-    }
     s
 }
 
