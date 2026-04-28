@@ -1,0 +1,7 @@
+/target
+/.env
+/testito.db
+/testito.db-shm
+/testito.db-wal
+/.playwright-cli/
+/.claude/skills/playwright-cli/

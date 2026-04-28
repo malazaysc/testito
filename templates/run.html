@@ -1,0 +1,78 @@
+{% extends "base.html" %}
+{% block title %}run — {{ run.name }}{% endblock %}
+{% block body %}
+
+<div x-data="runPageState()">
+  <div class="row" style="justify-content: space-between; align-items: center; margin-bottom: 0.4rem;">
+    <a href="/" class="muted" style="text-decoration:none;">← all runs</a>
+    <div class="row" style="gap: 0.5rem;">
+      <a class="btn btn-secondary" href="/runs/{{ run.id }}/export.md" download>Download .md</a>
+      {% if !other_runs.is_empty() %}
+        <details class="compare-pick">
+          <summary class="btn btn-secondary">Compare with…</summary>
+          <div class="compare-menu">
+            {% for o in other_runs %}
+              <a href="/compare?a={{ run.id }}&b={{ o.id }}">{{ o.name }}</a>
+            {% endfor %}
+          </div>
+        </details>
+      {% endif %}
+    </div>
+  </div>
+
+  <div id="run-body"
+       hx-get="/runs/{{ run.id }}/body"
+       hx-trigger="every 2s"
+       hx-swap="innerHTML">
+    {% include "run_body.html" %}
+  </div>
+</div>
+
+<script>
+  // Page-level Alpine state — defined outside the htmx swap target so it
+  // survives every poll. Test-card open state is keyed by the run_test id.
+  function runPageState() {
+    return {
+      q: '',
+      hide_passing: false,
+      openTests: {},
+      // Default-open the test if it isn't passing. Called from each card's x-init.
+      defaultOpen(id, status) {
+        if (this.openTests[id] === undefined) {
+          this.openTests[id] = status !== 'pass';
+        }
+      },
+      isOpen(id) {
+        return !!this.openTests[id];
+      },
+      toggle(id) {
+        this.openTests[id] = !this.openTests[id];
+      },
+    };
+  }
+
+  function applyTestFilter(q, hidePassing) {
+    const ql = (q || '').toLowerCase().trim();
+    document.querySelectorAll('.test-card').forEach(function (card) {
+      const hay = (card.dataset.haystack || '').toLowerCase();
+      const status = (card.className.match(/test-status-(\w+)/) || [])[1] || '';
+      const passing = status === 'pass';
+      let show = true;
+      if (ql && !hay.includes(ql)) show = false;
+      if (hidePassing && passing) show = false;
+      card.style.display = show ? '' : 'none';
+    });
+  }
+  // Re-apply filter after each htmx poll (the test list is replaced wholesale).
+  document.body.addEventListener('htmx:afterSwap', function (e) {
+    if (e.target && e.target.id === 'run-body') {
+      const scope = e.target.closest('[x-data]');
+      if (scope && window.Alpine) {
+        const data = window.Alpine.$data(scope);
+        applyTestFilter(data.q, data.hide_passing);
+      }
+    }
+  });
+</script>
+
+{% endblock %}

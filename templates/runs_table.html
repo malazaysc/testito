@@ -1,0 +1,51 @@
+<table>
+  <thead>
+    <tr>
+      <th>Run</th>
+      <th>Branch / Env</th>
+      <th>Tests</th>
+      <th>Counts</th>
+      <th>Started</th>
+      <th>Status</th>
+      <th></th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for r in rows %}
+    <tr class="run-row"
+        data-complete="{% match r.run.completed_at %}{% when Some with (_c) %}1{% when None %}0{% endmatch %}"
+        data-has-failures="{% if r.counts.fail > 0 %}1{% else %}0{% endif %}"
+        data-haystack="{{ r.run.name }} {{ r.run.description }} {{ r.run.branch }} {{ r.run.commit_sha }} {{ r.run.env }} {{ r.run.url }}">
+      <td>
+        <strong>{{ r.run.name }}</strong>
+        {% match r.rollup %}
+          {% when Some with (s) %}
+            <span class="pill pill-{{ s.as_str() }}" style="margin-left: 0.4rem;">{{ s.label() }}</span>
+          {% when None %}
+        {% endmatch %}
+        {% if !r.run.description.is_empty() %}<div class="muted" style="font-size: 0.8rem;">{{ r.run.description }}</div>{% endif %}
+      </td>
+      <td>
+        {% if !r.run.branch.is_empty() %}<code>{{ r.run.branch }}</code>{% endif %}
+        {% if !r.run.commit_sha.is_empty() %}<span class="muted">@{{ r.run.commit_sha[..r.run.commit_sha.len().min(8)] }}</span>{% endif %}
+        {% if !r.run.env.is_empty() %}<div class="muted" style="font-size: 0.78rem;">{{ r.run.env }}</div>{% endif %}
+      </td>
+      <td>{{ r.run.test_count }}</td>
+      <td class="counts-cell">
+        {% if r.counts.pass    > 0 %}<span class="pill pill-pass">{{ r.counts.pass }}P</span>{% endif %}
+        {% if r.counts.fail    > 0 %}<span class="pill pill-fail">{{ r.counts.fail }}F</span>{% endif %}
+        {% if r.counts.warning > 0 %}<span class="pill pill-warning">{{ r.counts.warning }}W</span>{% endif %}
+        {% if r.counts.skipped > 0 %}<span class="pill pill-skipped">{{ r.counts.skipped }}S</span>{% endif %}
+      </td>
+      <td class="muted" title="{{ r.run.started_at }}">{{ r.relative_started }}</td>
+      <td>
+        {% match r.run.completed_at %}
+          {% when Some with (_c) %}<span class="pill pill-pass">Completed</span>
+          {% when None %}<span class="pill pill-not_run">Running</span>
+        {% endmatch %}
+      </td>
+      <td><a class="btn btn-secondary" href="/runs/{{ r.run.id }}">Open</a></td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>

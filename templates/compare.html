@@ -1,0 +1,58 @@
+{% extends "base.html" %}
+{% block title %}compare — {{ a.name }} vs {{ b.name }}{% endblock %}
+{% block body %}
+
+<div class="row" style="justify-content: space-between; align-items: center; margin-bottom: 0.4rem;">
+  <a href="/runs/{{ a.id }}" class="muted" style="text-decoration:none;">← back to {{ a.name }}</a>
+</div>
+
+<h1>Compare runs</h1>
+
+<div class="row" style="gap: 0.4rem; margin-bottom: 1rem;">
+  <span><strong>A</strong>: <a href="/runs/{{ a.id }}">{{ a.name }}</a></span>
+  <span class="muted">vs</span>
+  <span><strong>B</strong>:
+    <select onchange="if(this.value) location.href='/compare?a={{ a.id }}&b='+this.value;">
+      {% for r in available %}
+        <option value="{{ r.id }}" {% if r.id == b.id %}selected{% endif %}>{{ r.name }}</option>
+      {% endfor %}
+    </select>
+  </span>
+</div>
+
+{% if rows.is_empty() %}
+  <div class="card"><p class="muted">Neither run has any tests yet.</p></div>
+{% else %}
+<table>
+  <thead>
+    <tr>
+      <th>Test</th>
+      <th>A: {{ a.name }}</th>
+      <th>B: {{ b.name }}</th>
+      <th>Diff</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for row in rows %}
+    <tr {% if row.differs %}class="diff-row"{% endif %}>
+      <td>{{ row.test_name }}</td>
+      <td>
+        {% match row.a_status %}
+          {% when Some with (s) %}<span class="pill pill-{{ s.as_str() }}">{{ s.label() }}</span>
+          {% when None %}<span class="muted">—</span>
+        {% endmatch %}
+      </td>
+      <td>
+        {% match row.b_status %}
+          {% when Some with (s) %}<span class="pill pill-{{ s.as_str() }}">{{ s.label() }}</span>
+          {% when None %}<span class="muted">—</span>
+        {% endmatch %}
+      </td>
+      <td>{% if row.differs %}<span class="pill pill-warning">changed</span>{% else %}<span class="muted">·</span>{% endif %}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+{% endblock %}

@@ -1,0 +1,111 @@
+<div class="row" style="justify-content: space-between; align-items: center;">
+  <div class="row" style="gap: 0.6rem;">
+    <h1 style="margin: 0">{{ run.name }}</h1>
+    {% match rollup %}
+      {% when Some with (s) %}
+        <span class="pill pill-{{ s.as_str() }}" style="font-size: 0.85rem;">{{ s.label() }}</span>
+      {% when None %}
+    {% endmatch %}
+  </div>
+  <span class="muted">live · 2s</span>
+</div>
+{% if !run.description.is_empty() %}<p class="muted" style="margin-top: 0.25rem;">{{ run.description }}</p>{% endif %}
+
+{% if run.has_metadata() %}
+<div class="meta-bar">
+  {% if !run.branch.is_empty() %}<span><strong>branch</strong> <code>{{ run.branch }}</code></span>{% endif %}
+  {% if !run.commit_sha.is_empty() %}<span><strong>commit</strong> <code>{{ run.commit_sha }}</code></span>{% endif %}
+  {% if !run.env.is_empty() %}<span><strong>env</strong> <code>{{ run.env }}</code></span>{% endif %}
+  {% if !run.url.is_empty() %}<span><strong>url</strong> <a href="{{ run.url }}" target="_blank">{{ run.url }}</a></span>{% endif %}
+</div>
+{% endif %}
+
+<p class="muted" style="margin-top: 0.4rem;">
+  <span title="{{ run.started_at }}">started {{ relative_started }}</span>
+  {% match run.completed_at %}
+    {% when Some with (c) %}· <span title="{{ c }}">completed {{ relative_completed.as_deref().unwrap_or("") }}</span>
+    {% when None %}· in progress
+  {% endmatch %}
+</p>
+
+<div class="counts-row">
+  <span class="pill pill-pass">{{ counts.pass }} pass</span>
+  <span class="pill pill-fail">{{ counts.fail }} fail</span>
+  <span class="pill pill-warning">{{ counts.warning }} warn</span>
+  <span class="pill pill-skipped">{{ counts.skipped }} skip</span>
+</div>
+
+{% if !notes.is_empty() %}
+  <h2>Notes</h2>
+  <div class="card" style="padding: 0.5rem 0.85rem;">
+    <ul class="bare">
+    {% for n in notes %}
+      <li class="note-row">
+        {% match n.note.scope %}
+          {% when crate::models::Scope::In %}<span class="pill pill-in-scope">in scope</span>
+          {% when crate::models::Scope::Out %}<span class="pill pill-warning">out of scope</span>
+        {% endmatch %}
+        <div class="note-text md-content">{{ n.text_html|safe }}</div>
+        <span class="muted note-time" title="{{ n.note.reported_at }}">{{ n.relative_reported }}</span>
+      </li>
+    {% endfor %}
+    </ul>
+  </div>
+{% endif %}
+
+<div class="row" style="justify-content: space-between; align-items: center; margin-top: 1.2rem;">
+  <h2 style="margin: 0">Tests</h2>
+  <div class="row" style="gap: 0.5rem;">
+    <input type="text" x-model.debounce.150ms="q" placeholder="Filter tests / steps…" style="width: 260px;">
+    <label class="muted" style="display: flex; align-items: center; gap: 0.3rem;">
+      <input type="checkbox" x-model="hide_passing"> hide passing
+    </label>
+  </div>
+</div>
+
+{% if tests.is_empty() %}
+  <div class="card"><p class="muted">No steps reported yet for this run.</p></div>
+{% else %}
+  <div x-effect="applyTestFilter(q, hide_passing)">
+  {% for t in tests %}
+    <div class="test-card test-status-{{ t.rollup_str }}"
+         data-haystack="{{ t.test.name }}{% for sr in t.steps %} {{ sr.step.name }} {{ sr.step.note }}{% endfor %}"
+         x-init="defaultOpen({{ t.test.id }}, '{{ t.rollup_str }}')">
+      <div class="test-header" @click="toggle({{ t.test.id }})" style="cursor: pointer;">
+        <span class="caret" :class="{ 'open': isOpen({{ t.test.id }}) }">▸</span>
+        {% match t.rollup %}
+          {% when Some with (s) %}<span class="pill pill-{{ s.as_str() }}">{{ s.label() }}</span>
+          {% when None %}<span class="pill pill-not_run">no steps</span>
+        {% endmatch %}
+        <strong class="test-title">{{ t.test.name }}</strong>
+        <span class="muted step-count">
+          {% if t.counts.pass    > 0 %}{{ t.counts.pass }}P {% endif %}
+          {% if t.counts.fail    > 0 %}{{ t.counts.fail }}F {% endif %}
+          {% if t.counts.warning > 0 %}{{ t.counts.warning }}W {% endif %}
+          {% if t.counts.skipped > 0 %}{{ t.counts.skipped }}S{% endif %}
+        </span>
+      </div>
+      <div class="test-body-wrap" x-show="isOpen({{ t.test.id }})" x-cloak>
+        <div class="test-body">
+          <div class="steps">
+          {% for sr in t.steps %}
+            <div class="step-row" data-result="{{ sr.step.result.as_str() }}" data-haystack="{{ sr.step.name }} {{ sr.step.note }}">
+              <div class="step-line">
+                <span class="status-dot status-{{ sr.step.result.as_str() }}"></span>
+                <span class="step-text">{{ sr.step.name }}</span>
+                <span class="pill pill-{{ sr.step.result.as_str() }}">{{ sr.step.result.label() }}</span>
+                {% if sr.step.attempt > 1 %}<span class="pill pill-not_run">try #{{ sr.step.attempt }}</span>{% endif %}
+                <span class="muted step-time" title="{{ sr.step.reported_at }}">{{ sr.relative_reported }}</span>
+              </div>
+              {% if !sr.note_html.is_empty() %}
+                <div class="step-note-display md-content">{{ sr.note_html|safe }}</div>
+              {% endif %}
+            </div>
+          {% endfor %}
+          </div>
+        </div>
+      </div>
+    </div>
+  {% endfor %}
+  </div>
+{% endif %}

@@ -1,0 +1,67 @@
+{% extends "base.html" %}
+{% block title %}testito — runs{% endblock %}
+{% block body %}
+
+<div class="row" style="justify-content: space-between; align-items: baseline;">
+  <h1 style="margin: 0">Runs</h1>
+  <span class="muted">live · 2s</span>
+</div>
+
+{% if rows.is_empty() %}
+  <div class="card">
+    <p>No runs yet.</p>
+    <p class="muted">Agents append runs by calling
+      <code>testito report --run "..." --test "..." --step "..." --result pass</code>.
+      The dashboard polls every 2 seconds, so reports appear as they happen.</p>
+    <p class="muted">See <code>testito --help</code> or the <code>testito</code> skill in <code>.claude/skills/testito/</code> for the agent-side instructions.</p>
+  </div>
+{% else %}
+  <div x-data="{ q: '', status: 'all' }" style="margin-bottom: 1rem;">
+    <div class="card filter-bar">
+      <input type="text" x-model.debounce.150ms="q" placeholder="Filter by run name, branch, env, description…">
+      <select x-model="status">
+        <option value="all">All status</option>
+        <option value="running">Running</option>
+        <option value="completed">Completed</option>
+        <option value="has_failures">Has failures</option>
+      </select>
+    </div>
+
+    <div id="runs-table"
+         hx-get="/runs"
+         hx-trigger="every 2s"
+         hx-swap="innerHTML"
+         x-effect="applyRunFilter(q, status)">
+      {% include "runs_table.html" %}
+    </div>
+  </div>
+{% endif %}
+
+<script>
+  function applyRunFilter(q, status) {
+    const ql = (q || '').toLowerCase().trim();
+    document.querySelectorAll('#runs-table tr.run-row').forEach(function (tr) {
+      const haystack = (tr.dataset.haystack || '').toLowerCase();
+      const isComplete = tr.dataset.complete === '1';
+      const hasFails = tr.dataset.hasFailures === '1';
+      let show = true;
+      if (ql && !haystack.includes(ql)) show = false;
+      if (status === 'running' && isComplete) show = false;
+      if (status === 'completed' && !isComplete) show = false;
+      if (status === 'has_failures' && !hasFails) show = false;
+      tr.style.display = show ? '' : 'none';
+    });
+  }
+  // Re-apply the filter after every htmx polling swap (rows are recreated on each poll).
+  document.body.addEventListener('htmx:afterSwap', function (e) {
+    if (e.target && e.target.id === 'runs-table') {
+      const scope = e.target.closest('[x-data]');
+      if (scope && window.Alpine) {
+        const data = window.Alpine.$data(scope);
+        applyRunFilter(data.q, data.status);
+      }
+    }
+  });
+</script>
+
+{% endblock %}
