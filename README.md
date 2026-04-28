@@ -1,5 +1,7 @@
 # testito
 
+[![CI](https://github.com/malazaysc/testito/actions/workflows/ci.yml/badge.svg)](https://github.com/malazaysc/testito/actions/workflows/ci.yml)
+
 A small, single-binary log for **manual testing**, designed for AI agents to write and humans to read.
 
 Agents call a CLI as they execute steps; the dashboard renders the run live in a browser.
@@ -33,16 +35,27 @@ The mental model is three nouns:
 
 ## Install
 
-You need a Rust toolchain. From the repo root:
+### From a GitHub release (no Rust toolchain needed)
+
+```bash
+# pick the asset for your platform from
+#   https://github.com/malazaysc/testito/releases/latest
+# example for macOS arm64:
+TAG=v0.1.0
+ASSET=testito-${TAG#v}-macos-aarch64
+curl -L -o /tmp/testito.tar.gz \
+  "https://github.com/malazaysc/testito/releases/download/${TAG}/${ASSET}.tar.gz"
+tar -xzf /tmp/testito.tar.gz -C /tmp
+install /tmp/${ASSET}/testito /usr/local/bin/testito
+```
+
+Available asset suffixes: `linux-x86_64`, `macos-aarch64`, `macos-x86_64`. Each release also ships a `.sha256` next to the tarball.
+
+### From source
 
 ```bash
 cargo build --release
 # binary at ./target/release/testito (~3.8 MB, no runtime deps)
-```
-
-Optionally drop it on your `PATH`:
-
-```bash
 ln -s "$(pwd)/target/release/testito" /usr/local/bin/testito
 ```
 
@@ -91,8 +104,14 @@ testito start  --run NAME [--description ...] [METADATA…]
 testito report --run NAME --test ... --step ... --result <pass|fail|warning|skipped>
                             [--attempt N] [--note ...] [METADATA…]
 testito note   --run NAME --scope <in|out> --text ...
-testito end    --run NAME
+testito end    --run NAME [--fail-if-failures]
+testito list   [--limit N] [--json]
+testito show   --run NAME [--json]
 ```
+
+`--fail-if-failures` makes `end` exit `1` when the run's rollup is `fail`. Wire it into CI: agent reports → `testito end --run "$RUN" --fail-if-failures` is the gate.
+
+`list` and `show` mirror what the dashboard renders, but in the terminal — handy for headless / CI runs. `--json` on either gives a stable shape for scripts.
 
 `[METADATA…]` (accepted by `start` and `report`):
 

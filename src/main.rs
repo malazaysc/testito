@@ -13,7 +13,7 @@ mod models;
 mod routes;
 
 use db::Db;
-use models::{Result as TestResult, RunMeta, Scope};
+use models::{relative_time, rollup, Result as TestResult, RunMeta, RunStep, Scope};
 
 #[derive(Parser, Debug)]
 #[command(name = "testito", version, about = "Manual testing log for AI agents")]
@@ -38,6 +38,12 @@ enum Cmd {
 
     /// Mark a run as completed.
     End(EndArgs),
+
+    /// List recent runs as a table (or JSON with --json).
+    List(ListArgs),
+
+    /// Print one run's metadata, counts, failures, tests, and notes to stdout.
+    Show(ShowArgs),
 }
 
 #[derive(Args, Debug, Default)]
@@ -159,6 +165,41 @@ struct EndArgs {
     #[arg(long)]
     run: String,
 
+    /// Exit with status 1 if the run's rollup is `fail` (any test ended on a failing
+    /// step). Useful for wiring testito into CI: agent reports → testito end checks.
+    #[arg(long)]
+    fail_if_failures: bool,
+
+    /// SQLite database file (default: platform data dir).
+    #[arg(long)]
+    db: Option<PathBuf>,
+}
+
+#[derive(Args, Debug)]
+struct ListArgs {
+    /// Maximum number of runs to print (newest first).
+    #[arg(long, default_value_t = 20)]
+    limit: usize,
+
+    /// Print as JSON instead of a human-readable table.
+    #[arg(long)]
+    json: bool,
+
+    /// SQLite database file (default: platform data dir).
+    #[arg(long)]
+    db: Option<PathBuf>,
+}
+
+#[derive(Args, Debug)]
+struct ShowArgs {
+    /// Run name.
+    #[arg(long)]
+    run: String,
+
+    /// Print as JSON instead of a human-readable summary.
+    #[arg(long)]
+    json: bool,
+
     /// SQLite database file (default: platform data dir).
     #[arg(long)]
     db: Option<PathBuf>,
@@ -205,6 +246,14 @@ async fn main() -> Result<()> {
         Cmd::End(a) => {
             let db_path = resolve_db(a.db.clone())?;
             cmd_end(db_path, a)
+        }
+        Cmd::List(a) => {
+            let db_path = resolve_db(a.db.clone())?;
+            cmd_list(db_path, a)
+        }
+        Cmd::Show(a) => {
+            let db_path = resolve_db(a.db.clone())?;
+            cmd_show(db_path, a)
         }
     }
 }
@@ -283,7 +332,275 @@ fn cmd_end(db_path: PathBuf, a: EndArgs) -> Result<()> {
         .find_run_id(&a.run)?
         .ok_or_else(|| anyhow::anyhow!("run '{}' does not exist", a.run))?;
     db.complete_run(run_id)?;
-    println!("run {} completed", a.run);
+    let run_rollup = compute_run_rollup(&db, run_id)?;
+    let status = run_rollup.map(|r| r.label()).unwrap_or("no steps reported");
+    println!("run {} completed · {}", a.run, status);
+    if a.fail_if_failures && run_rollup == Some(TestResult::Fail) {
+        // Distinct exit code so callers can branch on "test failure" vs "tool error".
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
+fn compute_run_rollup(db: &Db, run_id: i64) -> Result<Option<TestResult>> {
+    let mut all_latest: Vec<RunStep> = Vec::new();
+    for t in db.run_tests(run_id)? {
+        for s in db.steps_for_test(t.id)? {
+            all_latest.push(s);
+        }
+    }
+    Ok(rollup(&all_latest))
+}
+
+fn cmd_list(db_path: PathBuf, a: ListArgs) -> Result<()> {
+    let db = Db::open(&db_path)?;
+    let mut runs = db.list_runs()?;
+    runs.truncate(a.limit);
+
+    if a.json {
+        // A small ad-hoc JSON shape — keeps callers from needing to model Run.
+        let arr = runs
+            .iter()
+            .map(|r| {
+                let rollup = compute_run_rollup(&db, r.id).unwrap_or(None);
+                serde_json::json!({
+                    "id": r.id,
+                    "name": r.name,
+                    "description": r.description,
+                    "branch": r.branch,
+                    "commit": r.commit_sha,
+                    "env": r.env,
+                    "url": r.url,
+                    "started_at": r.started_at,
+                    "completed_at": r.completed_at,
+                    "tests": r.test_count,
+                    "steps": r.step_count,
+                    "notes": r.note_count,
+                    "rollup": rollup.map(|r| r.as_str()),
+                })
+            })
+            .collect::<Vec<_>>();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::Value::Array(arr))?
+        );
+        return Ok(());
+    }
+
+    if runs.is_empty() {
+        println!("(no runs)");
+        return Ok(());
+    }
+
+    // Table layout: name, status, rollup, tests, steps, started.
+    let name_w = runs.iter().map(|r| r.name.len()).max().unwrap_or(4).max(4);
+    let header = format!(
+        "{:<name_w$}  {:<10}  {:<8}  {:>5}  {:>5}  {}",
+        "NAME",
+        "STATUS",
+        "ROLLUP",
+        "TESTS",
+        "STEPS",
+        "STARTED",
+        name_w = name_w,
+    );
+    println!("{header}");
+    for r in &runs {
+        let status = if r.completed_at.is_some() {
+            "completed"
+        } else {
+            "running"
+        };
+        let rollup_str = compute_run_rollup(&db, r.id)?
+            .map(|r| r.as_str())
+            .unwrap_or("-");
+        println!(
+            "{:<name_w$}  {:<10}  {:<8}  {:>5}  {:>5}  {}",
+            r.name,
+            status,
+            rollup_str,
+            r.test_count,
+            r.step_count,
+            relative_time(&r.started_at),
+            name_w = name_w,
+        );
+    }
+    Ok(())
+}
+
+fn cmd_show(db_path: PathBuf, a: ShowArgs) -> Result<()> {
+    let db = Db::open(&db_path)?;
+    let run_id = db
+        .find_run_id(&a.run)?
+        .ok_or_else(|| anyhow::anyhow!("run '{}' does not exist", a.run))?;
+    let run = db
+        .get_run(run_id)?
+        .ok_or_else(|| anyhow::anyhow!("run disappeared mid-query"))?;
+
+    // Aggregate counts + per-test latest-attempt steps, in one pass.
+    let mut counts = (0i64, 0i64, 0i64, 0i64); // (pass, fail, warn, skip)
+    let mut tests_with_steps = Vec::new();
+    let mut all_latest_steps = Vec::new();
+    for t in db.run_tests(run_id)? {
+        let steps = db.steps_for_test(t.id)?;
+        for s in &steps {
+            match s.result {
+                TestResult::Pass => counts.0 += 1,
+                TestResult::Fail => counts.1 += 1,
+                TestResult::Warning => counts.2 += 1,
+                TestResult::Skipped => counts.3 += 1,
+            }
+            all_latest_steps.push(s.clone());
+        }
+        let test_rollup = rollup(&steps);
+        tests_with_steps.push((t, steps, test_rollup));
+    }
+    let run_rollup = rollup(&all_latest_steps);
+    let notes = db.notes_for_run(run_id)?;
+
+    if a.json {
+        let payload = serde_json::json!({
+            "name": run.name,
+            "description": run.description,
+            "branch": run.branch,
+            "commit": run.commit_sha,
+            "env": run.env,
+            "url": run.url,
+            "started_at": run.started_at,
+            "completed_at": run.completed_at,
+            "rollup": run_rollup.map(|r| r.as_str()),
+            "counts": {
+                "pass": counts.0,
+                "fail": counts.1,
+                "warning": counts.2,
+                "skipped": counts.3,
+            },
+            "tests": tests_with_steps.iter().map(|(t, steps, r)| serde_json::json!({
+                "name": t.name,
+                "rollup": r.map(|r| r.as_str()),
+                "steps": steps.iter().map(|s| serde_json::json!({
+                    "name": s.name,
+                    "attempt": s.attempt,
+                    "result": s.result.as_str(),
+                    "note": s.note,
+                    "reported_at": s.reported_at,
+                })).collect::<Vec<_>>(),
+            })).collect::<Vec<_>>(),
+            "notes": notes.iter().map(|n| serde_json::json!({
+                "scope": n.scope.as_str(),
+                "text": n.text,
+                "reported_at": n.reported_at,
+            })).collect::<Vec<_>>(),
+        });
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+        return Ok(());
+    }
+
+    println!(
+        "Run: {}{}",
+        run.name,
+        run_rollup
+            .map(|r| format!("  [{}]", r.label()))
+            .unwrap_or_default()
+    );
+    if !run.description.is_empty() {
+        println!("{}", run.description);
+    }
+    let meta_lines: Vec<(&str, &str)> = [
+        ("Branch", run.branch.as_str()),
+        ("Commit", run.commit_sha.as_str()),
+        ("Env", run.env.as_str()),
+        ("URL", run.url.as_str()),
+    ]
+    .into_iter()
+    .filter(|(_, v)| !v.is_empty())
+    .collect();
+    if !meta_lines.is_empty() {
+        println!();
+        for (k, v) in meta_lines {
+            println!("  {k}: {v}");
+        }
+    }
+    println!();
+    println!(
+        "Started {} · {}",
+        relative_time(&run.started_at),
+        run.completed_at
+            .as_deref()
+            .map_or("in progress", |_| "completed")
+    );
+    println!(
+        "Counts: {} pass · {} fail · {} warn · {} skip",
+        counts.0, counts.1, counts.2, counts.3
+    );
+
+    // Failures section first — that's the part you actually care about
+    let failing_steps: Vec<_> = tests_with_steps
+        .iter()
+        .flat_map(|(t, steps, _)| {
+            steps
+                .iter()
+                .filter(|s| s.result == TestResult::Fail)
+                .map(move |s| (t.name.as_str(), s))
+        })
+        .collect();
+    if !failing_steps.is_empty() {
+        println!();
+        println!("Failures:");
+        for (test, s) in failing_steps {
+            print!("  ✗ {test} / {}", s.name);
+            if s.attempt > 1 {
+                print!(" (attempt {})", s.attempt);
+            }
+            println!();
+            if !s.note.is_empty() {
+                for line in s.note.lines() {
+                    println!("      {line}");
+                }
+            }
+        }
+    }
+
+    println!();
+    println!("Tests:");
+    for (t, steps, t_rollup) in &tests_with_steps {
+        let icon = match t_rollup {
+            Some(TestResult::Pass) => "✓",
+            Some(TestResult::Fail) => "✗",
+            Some(TestResult::Warning) => "⚠",
+            Some(TestResult::Skipped) => "⊘",
+            None => "·",
+        };
+        println!(
+            "  {icon} {} ({} step{})",
+            t.name,
+            steps.len(),
+            if steps.len() == 1 { "" } else { "s" }
+        );
+    }
+
+    if !notes.is_empty() {
+        println!();
+        println!("Notes:");
+        for n in &notes {
+            let tag = match n.scope {
+                Scope::In => "[in] ",
+                Scope::Out => "[out]",
+            };
+            print!("  {tag} ");
+            // Indent multi-line notes so they read clearly under the tag
+            let mut lines = n.text.lines();
+            if let Some(first) = lines.next() {
+                println!("{first}");
+            } else {
+                println!();
+            }
+            for line in lines {
+                println!("        {line}");
+            }
+        }
+    }
+
     Ok(())
 }
 
