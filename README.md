@@ -104,6 +104,7 @@ testito start  --run NAME [--description ...] [METADATA…]
 testito report --run NAME --test ... --step ... --result <pass|fail|warning|skipped>
                             [--attempt N] [--note ...] [METADATA…]
 testito note   --run NAME --scope <in|out> --text ...
+testito jot    --run NAME --text ...                          # synonym for note --scope out
 testito end    --run NAME [--fail-if-failures]
 testito list   [--limit N] [--json]
 testito show   --run NAME [--json]
@@ -112,6 +113,8 @@ testito show   --run NAME [--json]
 `--fail-if-failures` makes `end` exit `1` when the run's rollup is `fail`. Wire it into CI: agent reports → `testito end --run "$RUN" --fail-if-failures` is the gate.
 
 `list` and `show` mirror what the dashboard renders, but in the terminal — handy for headless / CI runs. `--json` on either gives a stable shape for scripts.
+
+`jot` is the low-friction "I noticed something off, didn't fit the brief" command. It's a one-liner synonym for `note --scope out`. The skill (in `.claude/skills/testito/SKILL.md`) tells agents to use it freely as they test, so out-of-scope findings get filed in the moment instead of being lost or forgotten.
 
 `[METADATA…]` (accepted by `start` and `report`):
 

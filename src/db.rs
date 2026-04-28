@@ -304,6 +304,58 @@ impl Db {
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
     }
+
+    /// Stream read for `testito tail`: step rows whose id is greater than
+    /// `after_id`, ordered by id ascending. Each tuple is `(test_name, step)`
+    /// so the caller can render in one pass without a second lookup.
+    /// Pass `after_id = 0` for the full history.
+    pub fn tail_steps_after(&self, run_id: i64, after_id: i64) -> Result<Vec<(String, RunStep)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT t.name, s.id, s.run_test_id, s.name, s.attempt, s.result, s.note, s.reported_at
+             FROM run_steps s JOIN run_tests t ON t.id = s.run_test_id
+             WHERE t.run_id = ?1 AND s.id > ?2
+             ORDER BY s.id",
+        )?;
+        let rows = stmt
+            .query_map(params![run_id, after_id], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    RunStep {
+                        id: r.get(1)?,
+                        run_test_id: r.get(2)?,
+                        name: r.get(3)?,
+                        attempt: r.get(4)?,
+                        result: TestResult::parse(&r.get::<_, String>(5)?)
+                            .unwrap_or(TestResult::Skipped),
+                        note: r.get(6)?,
+                        reported_at: r.get(7)?,
+                    },
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// Stream read for `testito tail`: notes whose id is greater than `after_id`,
+    /// ordered by id ascending.
+    pub fn notes_after(&self, run_id: i64, after_id: i64) -> Result<Vec<RunNote>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, run_id, scope, text, reported_at FROM run_notes
+             WHERE run_id = ?1 AND id > ?2 ORDER BY id",
+        )?;
+        let rows = stmt
+            .query_map(params![run_id, after_id], |r| {
+                Ok(RunNote {
+                    id: r.get(0)?,
+                    run_id: r.get(1)?,
+                    scope: Scope::parse(&r.get::<_, String>(2)?).unwrap_or(Scope::In),
+                    text: r.get(3)?,
+                    reported_at: r.get(4)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
 }
 
 fn column_exists(conn: &Connection, table: &str, col: &str) -> rusqlite::Result<bool> {

@@ -5,7 +5,7 @@ description: Use this skill when running manual or automated tests where you (th
 
 # testito — step-by-step test reporting
 
-You are testing something on behalf of a human, and they want a structured log of what you did and what passed or failed. As you go, call the `testito` CLI to append each step result to a named **run**. The user opens a local web dashboard to watch the log fill up live.
+You are testing something on behalf of a human, and they want a structured log of what you did, what passed or failed, **and everything else you noticed along the way**. As you go, call the `testito` CLI to append each step result to a named **run** and to file every observation, including ones outside the brief. The user opens a local web dashboard to watch the log fill up live.
 
 ## When to use
 
@@ -15,6 +15,45 @@ You are testing something on behalf of a human, and they want a structured log o
 Do not use this skill for:
 - Running automated unit tests (`cargo test`, `pytest`, etc.) — those have their own reporters.
 - Just describing what should be tested without actually doing it.
+
+## File every finding (this is the part agents get wrong)
+
+While you test, you will see things outside the explicit brief — a typo, an unexpected console warning, a layout quirk, a slow page, a button that flashes the wrong state for half a second, copy that's confusing, a missing focus ring, a 404 in the network tab. **File those, even when nobody asked.** Reviewers cannot read your screen — if you don't write it down, it doesn't exist.
+
+**The cost of silence is much higher than the cost of a tangential note.** Out-of-scope notes:
+- do not affect the run's pass/fail status
+- do not slow you down (`testito jot --run "<name>" --text "..."` is one command, run it as you go)
+- do not pollute the test results — they live in a dedicated Notes section
+- can be filed even after the run is complete
+
+The cost of NOT filing is real: the user has to ask you again, sometimes several times, until they trust the run is clean. That round-trip is far more expensive than 10 jot calls.
+
+**Default to filing.** If you're hesitating ("is this worth reporting?") — yes, it is, jot it.
+
+### Examples that should always be jotted
+
+- Typos, grammatical issues, awkward copy
+- Misaligned buttons, pixels off, inconsistent spacing
+- Console errors or warnings unrelated to the test you're running
+- Network requests that 4xx/5xx unexpectedly
+- Anything that worked but felt slow, jumpy, or twitchy
+- A flow that worked but seemed needlessly complex (clicks + redirects)
+- Accessibility hits: missing `alt`, low contrast, no focus state, keyboard trap
+- Behavior that surprised you, even if you can't explain why
+
+### Before calling `testito end`, walk this checklist
+
+Ask yourself, out loud (in your reasoning), each of these. For each "yes," jot it before ending:
+
+1. What UI quirks did I see, even small ones?
+2. What console messages, network errors, or 4xx/5xx did I notice?
+3. What felt slow, sluggish, or jittery?
+4. What copy was confusing, wrong, or untranslated?
+5. What was non-obvious or surprised me?
+6. What looked broken on mobile / smaller widths?
+7. What accessibility issues did I spot?
+
+Only after you've answered all seven and filed every "yes" should you run `testito end`.
 
 ## The mental model
 
@@ -29,30 +68,38 @@ Steps are **append-only**. If you retry a step, log it again with `--attempt 2`.
 
 ```
 testito start --run "<name>" [--description "..."] [METADATA…]
-    Optional. Auto-created on first `report` if you skip this. Use it to attach
-    a description and run-level metadata.
+    Optional. Auto-created on first `report` if you skip this.
 
 testito report --run "<name>" --test "<scenario>" --step "<action>"
               --result <pass|fail|warning|skipped> [--attempt N] [--note "..."] [METADATA…]
     The main verb. Call this once per step as you go.
 
-testito note --run "<name>" --scope <in|out> --text "..."
-    Append a free-text observation to the run. Markdown is rendered in the dashboard.
-    Use scope=in for findings within the testing brief (e.g. "login is slow on first
-    request"); scope=out for things you noticed that weren't asked about (e.g.
-    "dashboard footer has a typo"). Default scope is in.
+testito jot --run "<name>" --text "..."
+    *** Use this freely. *** One-line, low-friction filing of an out-of-scope
+    observation. Markdown is rendered in the dashboard. There is no downside
+    to jotting too much; there is real downside to jotting too little.
 
-testito end --run "<name>"
-    Mark the run completed. Do this when you finish the session.
+testito note --run "<name>" --scope <in|out> --text "..."
+    Same idea but explicit about scope. Use scope=in for findings within the
+    testing brief that don't fit the step grain (e.g. "login is unusually
+    slow on first load"). Use scope=out (or just `jot`) for tangential
+    observations.
+
+testito end --run "<name>" [--fail-if-failures]
+    Mark the run completed. Walk the pre-end checklist FIRST.
+    --fail-if-failures exits 1 when the rollup is fail (CI hook).
+
+testito list   [--limit N] [--json]
+testito show   --run NAME [--json]
+testito tail   --run NAME       (when present — tails new step rows live)
 ```
 
-**Run metadata** (`[METADATA…]`) — pass on `start` or any `report`. Each non-empty value
-is upserted on the run; subsequent calls don't overwrite unless you pass them again.
-The dashboard shows them in a banner so a reviewer knows *what* was tested.
+**Run metadata** (`[METADATA…]`) — pass on `start` or any `report`. The dashboard
+shows them in a banner so a reviewer knows *what* was tested.
 
 ```
 --branch  <name>       e.g. main, feature/checkout
---commit  <sha>        e.g. abc1234 (full or short)
+--commit  <sha>        e.g. abc1234
 --env     <label>      e.g. local, staging, prod
 --url     <origin>     e.g. http://localhost:3000
 ```
@@ -62,43 +109,42 @@ Help: `testito --help`, `testito report --help`, etc.
 ## How to test
 
 1. **Pick a run name up front.** Combine purpose + date or build, e.g. `checkout-smoke-2026-04-28`. Use the **same name** for every command in the session.
-2. **Capture metadata up front.** Either via `testito start --run "<name>" --description "..." --branch ... --commit ... --env ... --url ...`, or pass `--branch/--commit/--env/--url` on the first `report`. The dashboard shows these prominently — they're how a reviewer knows what was tested.
+2. **Capture metadata up front.** Either via `testito start --run "<name>" --description "..." --branch ... --commit ... --env ... --url ...`, or pass `--branch/--commit/--env/--url` on the first `report`.
 3. **For each step you take, immediately call** `testito report ... --result <pass|fail|warning|skipped>`:
-   - Use `pass` when the verification succeeded.
-   - Use `fail` when the expected behavior didn't happen.
-   - Use `warning` when something worked but had a smell — slow, ugly, partially right.
-   - Use `skipped` when you couldn't run the step (preconditions missing, blocked by an earlier failure).
-   - Add `--note "..."` for failures or warnings to capture *what* went wrong (error message, screenshot path, observed values).
-4. **Notes are rendered as markdown.** Use code fences for tracebacks, backticks for paths/commands, links for URLs. Multi-line notes work — quote the whole thing in a single shell argument. Example: `--note "Failed: $(cat /tmp/err.log)"` or with explicit fences:
+   - `pass` — the verification succeeded.
+   - `fail` — the expected outcome did not happen. **Always pair with `--note`** describing the symptom.
+   - `warning` — it worked but with a caveat (slow, ugly, partially right). Pair with `--note`.
+   - `skipped` — couldn't run (preconditions missing, blocked by an earlier failure). Pair with `--note` saying why.
+4. **Jot tangential findings as you see them, not at the end.** `testito jot --run "<name>" --text "..."`. Don't batch — each observation goes in immediately so you don't forget.
+5. **Notes are markdown.** Code fences for tracebacks, backticks for paths/commands, links for URLs. Multi-line notes are fine — quote the whole thing in a single shell argument:
    ```
    --note $'```\nUncaught TypeError: Cannot read properties of undefined\n  at handleSubmit (login.ts:42)\n```'
    ```
-5. **If you retry a step** (e.g. it failed once, you fixed something, you're trying again), log the second attempt with `--attempt 2` (and so on). Don't overwrite — re-call `report` with the same `--test` and `--step` and a higher `--attempt`. The dashboard groups attempts under the same step.
-6. **Use `testito note` for anything outside the step grain.** Markdown is rendered. Findings unrelated to the current test, environmental observations, things to follow up on.
-7. **At the end**, call `testito end --run "<name>"`.
-8. Tell the user the run name and (if `testito serve` is running) the dashboard URL: `http://127.0.0.1:7878/runs/<id>` — they can also export the run as markdown via the **Download .md** button or compare it against any other run via **Compare with…**.
+6. **If you retry a step**, log the second attempt with `--attempt 2` (and so on). Don't overwrite — re-call `report` with the same `--test` and `--step` and a higher `--attempt`.
+7. **Walk the checklist** above before `end`. Jot anything left.
+8. **End the run.** `testito end --run "<name>"`.
+9. Tell the user the run name and (if `testito serve` is running) the dashboard URL: `http://127.0.0.1:7878/runs/<id>`. Mention the count of jotted findings (`testito show` will summarize).
 
 ## Result-vocabulary discipline
 
 - **`pass`**: the step's expected outcome happened. Don't use pass for "kind of worked".
-- **`fail`**: the expected outcome did not happen. Always pair with `--note` describing the symptom.
-- **`warning`**: it worked but with a caveat (e.g. unexpected delay, layout issue, console warning). Pair with `--note`.
+- **`fail`**: the expected outcome did not happen. Always pair with `--note`.
+- **`warning`**: it worked but with a caveat. Pair with `--note`.
 - **`skipped`**: you didn't run the step. Pair with `--note` saying why.
 
-If you're tempted to invent new categories, use a `testito note --scope in` instead.
+If you're tempted to invent new categories, that's a sign the observation belongs in `testito jot`, not in a step result.
 
 ## Phrasing guidance
 
 - **Test names** should describe the user-facing scenario in plain language. Good: `"create a customer with valid required fields"`. Bad: `"test_customer_create_valid"`, `"happy path"`.
 - **Step names** should describe one observable action or assertion. Good: `"submit the form and confirm a 'created' toast appears"`. Bad: `"step 1"`, `"check stuff"`.
-- Reuse exactly the same `--test` string when reporting multiple steps under the same scenario — the dashboard groups by it.
+- **Jot text** is markdown. Lead with what you saw, not what you think it means: `"Footer copyright says 2024 on /login (expected current year)"` is better than `"Possible footer issue."`
 
 ## Worked example
 
 ```bash
 RUN=auth-smoke-2026-04-28
 
-# kicking off — capture metadata so the reviewer knows what was tested
 testito start --run "$RUN" \
   --description "Login + password reset on staging" \
   --branch main --commit abc1234 --env staging --url https://staging.example.com
@@ -108,6 +154,10 @@ testito report --run "$RUN" \
   --test "login with valid credentials" \
   --step "navigate to /login" --result pass
 
+# I noticed something tangential while loading the page — file it now, don't wait
+testito jot --run "$RUN" \
+  --text "Login page logo is slightly blurry on retina; suspect missing 2x asset."
+
 testito report --run "$RUN" \
   --test "login with valid credentials" \
   --step "enter valid email and password and click Sign in" --result pass
@@ -115,7 +165,7 @@ testito report --run "$RUN" \
 testito report --run "$RUN" \
   --test "login with valid credentials" \
   --step "redirected to /dashboard within 2s" --result warning \
-  --note "Took ~3.5s on first request. Subsequent loads were ~400ms."
+  --note "Took ~3.5s on first request, ~400ms after."
 
 # Test 2 — failure + retry pattern, with a code-block in the note
 testito report --run "$RUN" \
@@ -127,17 +177,17 @@ testito report --run "$RUN" \
   --step "reset email arrives within 30s" --result fail \
   --note $'Waited 90s, no email.\n\n```\nWorker log: redis: connection refused (172.18.0.4:6379)\n```'
 
-# Cleared a stuck queue, retrying
 testito report --run "$RUN" \
   --test "password reset email arrives" \
   --step "reset email arrives within 30s" --result pass --attempt 2 \
   --note "Arrived in ~12s after worker restart."
 
-# Out-of-scope finding (markdown supported)
-testito note --run "$RUN" --scope out \
-  --text "Footer copyright still says **2024** on the login page."
+# More tangential things noticed during the session
+testito jot --run "$RUN" --text "Footer copyright still says **2024** on the login page."
+testito jot --run "$RUN" --text "Reset email subject is 'Reset Your Password.' (lowercase Y in actual mail), inconsistent with the heading."
+testito jot --run "$RUN" --text "Console: \`Warning: validateDOMNesting(...): <div> cannot appear as a descendant of <p>.\` on /reset."
 
-# Done
+# Walk the pre-end checklist above. Jot anything else. THEN:
 testito end --run "$RUN"
 ```
 
@@ -147,7 +197,8 @@ The user runs `testito` (or `testito serve`) in a separate terminal. The dashboa
 
 ## Common mistakes to avoid
 
-- **Don't batch** — call `testito report` after each step, not at the end. The point is a live log.
-- **Don't pre-write the steps** — the agent should report what *actually* happened, in order, including ones that weren't planned.
-- **Don't skip `--note`** on failures and warnings. The single line of context is what makes the log useful for the human reviewer.
+- **Don't batch notes at the end** — call `testito jot` (or `testito report`) the moment you notice something. Half of agent omissions happen because the agent forgot a finding by the time it got around to filing.
+- **Don't filter for relevance.** Filing has no downside. If you're unsure whether something belongs, jot it.
+- **Don't skip `--note`** on failures and warnings.
 - **Don't rename the test mid-session** — pick the `--test "..."` string once and reuse it verbatim for all steps in that scenario.
+- **Don't call `testito end` until you've walked the pre-end checklist** above.

@@ -36,6 +36,12 @@ enum Cmd {
     /// Append a free-text note to a run, marked in or out of scope.
     Note(NoteArgs),
 
+    /// Quick jot: file an out-of-scope observation. Low-friction synonym for
+    /// `note --scope out`. Use freely as you test — small UI quirks, typos,
+    /// surprising behavior, accessibility hits, anything you noticed but
+    /// wasn't explicitly asked about.
+    Jot(JotArgs),
+
     /// Mark a run as completed.
     End(EndArgs),
 
@@ -160,6 +166,21 @@ struct NoteArgs {
 }
 
 #[derive(Args, Debug)]
+struct JotArgs {
+    /// Run name.
+    #[arg(long)]
+    run: String,
+
+    /// The observation. Markdown is rendered in the dashboard.
+    #[arg(long)]
+    text: String,
+
+    /// SQLite database file (default: platform data dir).
+    #[arg(long)]
+    db: Option<PathBuf>,
+}
+
+#[derive(Args, Debug)]
 struct EndArgs {
     /// Run name.
     #[arg(long)]
@@ -243,6 +264,10 @@ async fn main() -> Result<()> {
             let db_path = resolve_db(a.db.clone())?;
             cmd_note(db_path, a)
         }
+        Cmd::Jot(a) => {
+            let db_path = resolve_db(a.db.clone())?;
+            cmd_jot(db_path, a)
+        }
         Cmd::End(a) => {
             let db_path = resolve_db(a.db.clone())?;
             cmd_end(db_path, a)
@@ -323,6 +348,14 @@ fn cmd_note(db_path: PathBuf, a: NoteArgs) -> Result<()> {
     let run_id = db.ensure_run(&a.run, &RunMeta::default())?;
     let id = db.append_note(run_id, scope, &a.text)?;
     println!("note #{} on {} ({})", id, a.run, scope.as_str());
+    Ok(())
+}
+
+fn cmd_jot(db_path: PathBuf, a: JotArgs) -> Result<()> {
+    let db = Db::open(&db_path)?;
+    let run_id = db.ensure_run(&a.run, &RunMeta::default())?;
+    let id = db.append_note(run_id, Scope::Out, &a.text)?;
+    println!("jotted #{} on {} (out of scope)", id, a.run);
     Ok(())
 }
 
