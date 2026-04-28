@@ -48,8 +48,7 @@ jobs:
           name="testito-${version}-${{ matrix.suffix }}"
           mkdir -p "dist/$name"
           cp "target/${{ matrix.target }}/release/testito" "dist/$name/"
-          cp README.md LICENSE.md 2>/dev/null || true
-          # LICENSE.md may not exist yet; ignore
+          cp README.md LICENSE "dist/$name/" 2>/dev/null || true
           ( cd dist && tar -czf "$name.tar.gz" "$name" )
           # platform-appropriate sha256 binary
           if command -v shasum >/dev/null; then
