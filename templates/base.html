@@ -125,6 +125,52 @@
   .kind-counts .pill { font-size: 0.78rem; padding: 0.2rem 0.55rem; }
   .kind-counts:hover .pill { filter: brightness(1.15); }
 
+  /* copy buttons — small unobtrusive label, flashes "✓ copied" on click */
+  .copy-btn {
+    background: transparent; color: var(--muted);
+    border: 1px solid var(--border); border-radius: 4px;
+    padding: 0.1rem 0.45rem; font-size: 0.72rem;
+    cursor: pointer; font-family: inherit;
+    transition: color 0.15s, border-color 0.15s;
+  }
+  .copy-btn:hover { color: var(--fg); border-color: #484f58; }
+  .copy-btn-flash { color: var(--pass); border-color: var(--pass); }
+
+  /* PR-summary collapsible block — sits between counts and findings banner */
+  .pr-summary {
+    margin: 0.85rem 0 0.6rem;
+    border: 1px solid var(--border); border-radius: 6px;
+    background: var(--card);
+  }
+  .pr-summary > summary {
+    padding: 0.55rem 0.85rem; cursor: pointer; user-select: none;
+    list-style: none;
+  }
+  .pr-summary > summary::-webkit-details-marker { display: none; }
+  .pr-summary > summary::before {
+    content: "▸ "; color: var(--muted); display: inline-block;
+    width: 1em; transition: transform 0.15s;
+  }
+  .pr-summary[open] > summary::before { content: "▾ "; }
+  .pr-summary-toggle { font-weight: 500; }
+  .pr-summary-body {
+    position: relative;
+    padding: 0 0.85rem 0.85rem;
+    border-top: 1px solid var(--border);
+  }
+  .pr-summary-copy {
+    position: absolute; top: 0.55rem; right: 0.55rem;
+  }
+  .pr-summary-md {
+    background: #0d1117; border: 1px solid var(--border);
+    padding: 0.85rem 1rem 0.85rem 1rem;
+    border-radius: 5px;
+    margin-top: 0.65rem;
+    font-size: 0.82rem; line-height: 1.55;
+    white-space: pre-wrap; word-break: break-word;
+    color: var(--fg);
+  }
+
   /* Each note row has a thin colored accent on the left edge so the eye can
      scan a list of notes by kind without reading them. */
   .note-row { position: relative; padding-left: 0.7rem; }

@@ -36,6 +36,7 @@
       q: '',
       hide_passing: false,
       openTests: {},
+      prOpen: false,
       // Default-open the test if it isn't passing. Called from each card's x-init.
       defaultOpen(id, status) {
         if (this.openTests[id] === undefined) {
@@ -73,6 +74,39 @@
       }
     }
   });
+
+  // ---- clipboard helpers ----
+  function flashCopied(btn) {
+    const orig = btn.dataset.origLabel || btn.textContent;
+    if (!btn.dataset.origLabel) btn.dataset.origLabel = orig;
+    btn.textContent = '✓ copied';
+    btn.classList.add('copy-btn-flash');
+    clearTimeout(btn._copyTimer);
+    btn._copyTimer = setTimeout(function () {
+      btn.textContent = orig;
+      btn.classList.remove('copy-btn-flash');
+    }, 1500);
+  }
+  // Read text from a data attribute on the button itself.
+  async function copyFromAttr(btn) {
+    try {
+      await navigator.clipboard.writeText(btn.dataset.copyText || '');
+      flashCopied(btn);
+    } catch (e) {
+      console.warn('copy failed', e);
+    }
+  }
+  // Read text from a sibling <pre> next to the button (used for the PR summary
+  // block which is multi-line and lives next to the copy button).
+  async function copyFromSibling(btn) {
+    const pre = btn.parentElement.querySelector('pre');
+    try {
+      await navigator.clipboard.writeText(pre ? pre.textContent : '');
+      flashCopied(btn);
+    } catch (e) {
+      console.warn('copy failed', e);
+    }
+  }
 </script>
 
 {% endblock %}

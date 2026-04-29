@@ -49,6 +49,21 @@
   <span class="pill pill-skipped">{{ counts.skipped }} skip</span>
 </div>
 
+<details class="pr-summary"
+         :open="prOpen"
+         @toggle="prOpen = $event.target.open">
+  <summary>
+    <span class="pr-summary-toggle">PR description</span>
+    <span class="muted" style="font-size: 0.8rem;">— click to expand a paste-ready markdown summary</span>
+  </summary>
+  <div class="pr-summary-body">
+    <button type="button" class="copy-btn pr-summary-copy"
+            onclick="copyFromSibling(this)"
+            title="Copy the markdown blurb to clipboard">📋 copy markdown</button>
+    <pre class="pr-summary-md">{{ pr_summary_md }}</pre>
+  </div>
+</details>
+
 {% if findings > 0 %}
 <div id="findings" class="findings-banner">
   <div class="findings-banner-icon">📋</div>
@@ -83,6 +98,11 @@
             {% endmatch %}
           </span>
           <span class="muted note-time" title="{{ n.note.reported_at }}">{{ n.relative_reported }}</span>
+          <button class="copy-btn"
+                  type="button"
+                  data-copy-text="{{ n.copy_text }}"
+                  title="Copy this finding as markdown"
+                  onclick="copyFromAttr(this)">📋 copy</button>
         </div>
         <div class="note-text md-content">{{ n.text_html|safe }}</div>
       </li>

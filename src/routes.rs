@@ -120,6 +120,10 @@ struct NoteRow {
     note: RunNote,
     text_html: String,
     relative_reported: String,
+    /// Precomputed "[Kind] body" string for one-click copy. Kept server-side
+    /// so the template doesn't need to assemble it (and we don't ship the
+    /// whole notes array to the client just for clipboard).
+    copy_text: String,
 }
 
 struct TestRow {
@@ -157,6 +161,7 @@ struct RunTpl {
     other_runs: Vec<Run>,
     findings: i64,
     kind_counts: KindCounts,
+    pr_summary_md: String,
 }
 
 #[derive(Template)]
@@ -171,6 +176,10 @@ struct RunBodyTpl {
     rollup: Option<TestResult>,
     findings: i64,
     kind_counts: KindCounts,
+    /// A tight markdown blurb meant for pasting into a PR description /
+    /// review comment. Rendered into a collapsible section at the top of
+    /// the run page with a one-click Copy button.
+    pr_summary_md: String,
 }
 
 #[derive(Template)]
@@ -271,6 +280,7 @@ async fn run_page(
         other_runs,
         findings: body.findings,
         kind_counts: body.kind_counts,
+        pr_summary_md: body.pr_summary_md,
     }))
 }
 
@@ -348,11 +358,13 @@ async fn build_run_body(state: &AppState, id: i64) -> Result<RunBodyTpl, AppErro
         .map(|n| NoteRow {
             text_html: md::to_html(&n.text),
             relative_reported: relative_time(&n.reported_at),
+            copy_text: format!("[{}] {}", n.kind.label(), n.text),
             note: n,
         })
         .collect();
 
     let run_rollup = rollup(&all_latest);
+    let pr_summary_md = render_pr_summary(&run, run_rollup, &counts, &notes, &tests_out);
 
     Ok(RunBodyTpl {
         run,
@@ -364,6 +376,7 @@ async fn build_run_body(state: &AppState, id: i64) -> Result<RunBodyTpl, AppErro
         rollup: run_rollup,
         findings,
         kind_counts,
+        pr_summary_md,
     })
 }
 
@@ -385,6 +398,94 @@ async fn export_markdown(
         ),
     ];
     Ok((headers, md))
+}
+
+/// A tight one-block summary suitable for pasting into a PR description or
+/// review comment. Shorter and flatter than the full export — leads with the
+/// rollup, surfaces findings (sorted by kind), then any failing steps.
+fn render_pr_summary(
+    run: &Run,
+    rollup: Option<TestResult>,
+    counts: &ResultCounts,
+    notes: &[NoteRow],
+    tests: &[TestRow],
+) -> String {
+    let mut s = String::new();
+    let rollup_label = rollup.map(|r| r.label()).unwrap_or("no steps");
+    s.push_str(&format!("## QA: {}  [{}]\n", run.name, rollup_label));
+    if !run.description.is_empty() {
+        s.push_str(&format!("\n_{}_\n", run.description));
+    }
+
+    let mut meta_bits: Vec<String> = Vec::new();
+    if !run.branch.is_empty() {
+        meta_bits.push(format!("branch `{}`", run.branch));
+    }
+    if !run.commit_sha.is_empty() {
+        meta_bits.push(format!("commit `{}`", run.commit_sha));
+    }
+    if !run.env.is_empty() {
+        meta_bits.push(format!("env `{}`", run.env));
+    }
+    if !run.url.is_empty() {
+        meta_bits.push(format!("url <{}>", run.url));
+    }
+    if !meta_bits.is_empty() {
+        s.push_str(&format!("\n{}\n", meta_bits.join(" · ")));
+    }
+
+    s.push_str(&format!(
+        "\n**Steps**: {} pass · {} fail · {} warn · {} skip\n",
+        counts.pass, counts.fail, counts.warning, counts.skipped
+    ));
+
+    if !notes.is_empty() {
+        s.push_str(&format!("\n### Findings ({})\n\n", notes.len()));
+        for n in notes {
+            let icon = n.note.kind.emoji();
+            // First line of body becomes the headline; collapse newlines so
+            // the bullet stays on one line in the rendered PR comment.
+            let one_line = n.note.text.replace('\n', " ").trim().to_string();
+            s.push_str(&format!(
+                "- {} **{}**: {}\n",
+                icon,
+                n.note.kind.label(),
+                one_line
+            ));
+        }
+    }
+
+    // Failures (only the latest-failing attempts).
+    let failing: Vec<(&str, &StepRow)> = tests
+        .iter()
+        .flat_map(|t| {
+            t.steps
+                .iter()
+                .filter(|s| matches!(s.step.result, TestResult::Fail))
+                .map(move |s| (t.test.name.as_str(), s))
+        })
+        .collect();
+    if !failing.is_empty() {
+        s.push_str(&format!("\n### Failures ({})\n\n", failing.len()));
+        for (test, sr) in failing {
+            let suffix = if sr.step.attempt > 1 {
+                format!(" _(attempt {})_", sr.step.attempt)
+            } else {
+                String::new()
+            };
+            let body = if sr.step.note.is_empty() {
+                "no note".to_string()
+            } else {
+                sr.step.note.replace('\n', " ").trim().to_string()
+            };
+            s.push_str(&format!(
+                "- **{}** / {}{}: {}\n",
+                test, sr.step.name, suffix, body
+            ));
+        }
+    }
+
+    s
 }
 
 fn render_markdown_export(b: &RunBodyTpl) -> String {
