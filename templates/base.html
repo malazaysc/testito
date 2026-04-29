@@ -70,10 +70,15 @@
   .status-dot.status-warning { background: var(--warn); }
   .status-dot.status-skipped { background: var(--skip); }
 
-  /* notes */
-  .note-row { display: flex; gap: 0.6rem; align-items: flex-start; padding: 0.45rem 0; border-bottom: 1px dashed var(--border); }
-  .note-row:last-child { border-bottom: none; }
-  .note-text { flex: 1; }
+  /* notes — stacked layout: header line above, body below at constrained width */
+  .note-row {
+    padding: 0.85rem 0;
+    border-bottom: 1px solid rgba(255,255,255,.04);
+  }
+  .note-row:first-child { padding-top: 0.4rem; }
+  .note-row:last-child { border-bottom: none; padding-bottom: 0.4rem; }
+  .note-header { display: flex; gap: 0.6rem; align-items: center; margin-bottom: 0.45rem; }
+  .note-text { max-width: 78ch; line-height: 1.55; }
 
   /* alpine cloak */
   [x-cloak] { display: none !important; }
@@ -139,15 +144,38 @@
   /* markdown content */
   .md-content > :first-child { margin-top: 0; }
   .md-content > :last-child  { margin-bottom: 0; }
-  .md-content p { margin: 0.3rem 0; }
-  .md-content code { background: #21262d; padding: 0.05rem 0.35rem; border-radius: 4px; font-size: 0.85em; }
-  .md-content pre { background: #0d1117; border: 1px solid var(--border); padding: 0.5rem 0.7rem; border-radius: 5px; overflow-x: auto; font-size: 0.85em; }
-  .md-content pre code { background: transparent; padding: 0; }
-  .md-content ul, .md-content ol { margin: 0.3rem 0 0.3rem 1.2rem; padding: 0; }
-  .md-content blockquote { margin: 0.3rem 0; padding: 0.2rem 0.7rem; border-left: 2px solid var(--border); color: var(--muted); }
+  .md-content p { margin: 0.5rem 0; }
+  /* inline code is softened so it doesn't visually shred a paragraph; the
+     fenced-block code keeps the harder contrast since it's a deliberate block */
+  .md-content code {
+    background: rgba(255,255,255,.04);
+    color: #cdd6e0;
+    padding: 0.05rem 0.3rem;
+    border-radius: 3px;
+    font-size: 0.88em;
+    word-break: break-word;
+  }
+  .md-content pre {
+    background: #0d1117; border: 1px solid var(--border);
+    padding: 0.55rem 0.75rem; border-radius: 5px;
+    overflow-x: auto; font-size: 0.85em;
+    margin: 0.6rem 0;
+  }
+  .md-content pre code {
+    background: transparent; padding: 0; color: var(--fg);
+    font-size: 1em;
+  }
+  .md-content ul, .md-content ol { margin: 0.45rem 0 0.45rem 1.4rem; padding: 0; }
+  .md-content li { margin: 0.18rem 0; }
+  .md-content blockquote { margin: 0.5rem 0; padding: 0.25rem 0.75rem; border-left: 2px solid var(--border); color: var(--muted); }
   .md-content a { color: var(--accent); }
-  .md-content table { margin: 0.3rem 0; }
-  .md-content table td, .md-content table th { padding: 0.2rem 0.5rem; }
+  .md-content table { margin: 0.5rem 0; }
+  .md-content table td, .md-content table th { padding: 0.25rem 0.5rem; }
+  /* sub-headings inside a note get visual weight so the eye can find structure */
+  .md-content h1, .md-content h2 { font-size: 1.05em; font-weight: 600; margin: 0.85rem 0 0.3rem; }
+  .md-content h3, .md-content h4 { font-size: 1em;    font-weight: 600; margin: 0.7rem 0 0.25rem; }
+  .md-content h5, .md-content h6 { font-size: 0.95em; font-weight: 600; margin: 0.55rem 0 0.2rem; }
+  .md-content strong { color: #f0f6fc; }
 </style>
 </head>
 <body>

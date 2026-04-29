@@ -69,12 +69,14 @@
     <ul class="bare">
     {% for n in notes %}
       <li class="note-row">
-        {% match n.note.scope %}
-          {% when crate::models::Scope::In %}<span class="pill pill-in-scope">in scope</span>
-          {% when crate::models::Scope::Out %}<span class="pill pill-warning">out of scope</span>
-        {% endmatch %}
+        <div class="note-header">
+          {% match n.note.scope %}
+            {% when crate::models::Scope::In %}<span class="pill pill-in-scope">in scope</span>
+            {% when crate::models::Scope::Out %}<span class="pill pill-warning">out of scope</span>
+          {% endmatch %}
+          <span class="muted note-time" title="{{ n.note.reported_at }}">{{ n.relative_reported }}</span>
+        </div>
         <div class="note-text md-content">{{ n.text_html|safe }}</div>
-        <span class="muted note-time" title="{{ n.note.reported_at }}">{{ n.relative_reported }}</span>
       </li>
     {% endfor %}
     </ul>
