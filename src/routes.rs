@@ -2,8 +2,8 @@ use axum::{
     extract::{Path as AxPath, Query, State},
     http::{header, StatusCode},
     response::{Html, IntoResponse, Response},
-    routing::get,
-    Router,
+    routing::{get, post},
+    Form, Router,
 };
 use serde::Deserialize;
 
@@ -11,7 +11,8 @@ use askama::Template;
 
 use crate::md;
 use crate::models::{
-    relative_time, rollup, Attachment, Result as TestResult, Run, RunNote, RunStep, RunTest,
+    relative_time, rollup, Attachment, Feedback, FeedbackTarget, Result as TestResult, Run,
+    RunNote, RunStep, RunTest,
 };
 use crate::storage;
 use crate::AppState;
@@ -26,7 +27,68 @@ pub fn router(state: AppState) -> Router {
         .route("/compare", get(compare_page))
         .route("/compare/test", get(compare_test_fragment))
         .route("/screenshots/:filename", get(serve_screenshot))
+        .route("/feedback", post(post_feedback))
         .with_state(state)
+}
+
+#[derive(serde::Deserialize)]
+struct PostFeedbackForm {
+    run_id: i64,
+    target_kind: String,
+    target_id: i64,
+    text: String,
+}
+
+async fn post_feedback(
+    State(state): State<AppState>,
+    Form(form): Form<PostFeedbackForm>,
+) -> Result<impl IntoResponse, AppError> {
+    let target_kind = FeedbackTarget::parse(&form.target_kind)?;
+    let text = form.text.trim();
+    if text.is_empty() {
+        return Err(AppError::Other(anyhow::anyhow!("feedback text required")));
+    }
+    let db = state.db.lock().await;
+    // Validate the target belongs to the named run — trust nothing from the
+    // form. (The dashboard is local but defense in depth is cheap.)
+    let belongs = match target_kind {
+        FeedbackTarget::Note => db
+            .conn
+            .query_row::<i64, _, _>(
+                "SELECT 1 FROM run_notes WHERE id = ?1 AND run_id = ?2",
+                rusqlite::params![form.target_id, form.run_id],
+                |r| r.get(0),
+            )
+            .is_ok(),
+        FeedbackTarget::Test => db
+            .conn
+            .query_row::<i64, _, _>(
+                "SELECT 1 FROM run_tests WHERE id = ?1 AND run_id = ?2",
+                rusqlite::params![form.target_id, form.run_id],
+                |r| r.get(0),
+            )
+            .is_ok(),
+        FeedbackTarget::Run => form.target_id == form.run_id,
+    };
+    if !belongs {
+        return Err(AppError::NotFound(format!(
+            "{} {} in run {}",
+            target_kind.as_str(),
+            form.target_id,
+            form.run_id
+        )));
+    }
+    let id = db.insert_feedback(form.run_id, target_kind, form.target_id, text)?;
+    let f = Feedback {
+        id,
+        run_id: form.run_id,
+        target_kind,
+        target_id: form.target_id,
+        text: text.to_string(),
+        created_at: chrono::Utc::now().to_rfc3339(),
+        seen_at: None,
+    };
+    Ok(render(FeedbackItemTpl::from(&f)))
 }
 
 async fn serve_screenshot(AxPath(filename): AxPath<String>) -> Response {
@@ -148,6 +210,7 @@ struct NoteRow {
     /// whole notes array to the client just for clipboard).
     copy_text: String,
     attachments: Vec<Attachment>,
+    feedback: Vec<FeedbackItemTpl>,
 }
 
 struct TestRow {
@@ -156,6 +219,7 @@ struct TestRow {
     rollup_str: String,
     steps: Vec<StepRow>,
     counts: ResultCounts,
+    feedback: Vec<FeedbackItemTpl>,
 }
 
 // ---------- templates ----------
@@ -227,6 +291,24 @@ struct CompareRow {
 #[template(path = "compare_test.html")]
 struct CompareTestTpl {
     rows: Vec<StepDiffRow>,
+}
+
+#[derive(Template)]
+#[template(path = "feedback_item.html")]
+struct FeedbackItemTpl {
+    feedback: Feedback,
+    text_html: String,
+    relative_created: String,
+}
+
+impl FeedbackItemTpl {
+    fn from(f: &Feedback) -> Self {
+        Self {
+            text_html: md::to_html(&f.text),
+            relative_created: relative_time(&f.created_at),
+            feedback: f.clone(),
+        }
+    }
 }
 
 struct StepDiffRow {
@@ -328,6 +410,21 @@ async fn build_run_body(state: &AppState, id: i64) -> Result<RunBodyTpl, AppErro
     // (target_kind, target_id) so the per-step / per-note loops are O(1).
     let mut attachments_map = db.attachments_for_run(id)?;
 
+    // Same idea for feedback — one fetch, group by target.
+    let all_feedback = db.feedback_for_run(id)?;
+    let mut feedback_by_note: std::collections::HashMap<i64, Vec<FeedbackItemTpl>> =
+        std::collections::HashMap::new();
+    let mut feedback_by_test: std::collections::HashMap<i64, Vec<FeedbackItemTpl>> =
+        std::collections::HashMap::new();
+    for f in &all_feedback {
+        let item = FeedbackItemTpl::from(f);
+        match f.target_kind {
+            FeedbackTarget::Note => feedback_by_note.entry(f.target_id).or_default().push(item),
+            FeedbackTarget::Test => feedback_by_test.entry(f.target_id).or_default().push(item),
+            FeedbackTarget::Run => {} // not surfaced inline yet
+        }
+    }
+
     let mut tests_out = Vec::new();
     let mut counts = ResultCounts::default();
     let mut all_latest: Vec<RunStep> = Vec::new();
@@ -363,12 +460,14 @@ async fn build_run_body(state: &AppState, id: i64) -> Result<RunBodyTpl, AppErro
         let rollup_str = rollup_status
             .map(|s| s.as_str().to_string())
             .unwrap_or_else(|| "none".to_string());
+        let feedback = feedback_by_test.remove(&t.id).unwrap_or_default();
         tests_out.push(TestRow {
             test: t,
             rollup: rollup_status,
             rollup_str,
             steps,
             counts: t_counts,
+            feedback,
         });
     }
 
@@ -391,11 +490,13 @@ async fn build_run_body(state: &AppState, id: i64) -> Result<RunBodyTpl, AppErro
             let attachments = attachments_map
                 .remove(&("note".to_string(), n.id))
                 .unwrap_or_default();
+            let feedback = feedback_by_note.remove(&n.id).unwrap_or_default();
             NoteRow {
                 text_html: md::to_html(&n.text),
                 relative_reported: relative_time(&n.reported_at),
                 copy_text: format!("[{}] {}", n.kind.label(), n.text),
                 attachments,
+                feedback,
                 note: n,
             }
         })

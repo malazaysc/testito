@@ -110,8 +110,18 @@ testito end --run "<name>" [--fail-if-failures]
 
 testito list   [--limit N] [--json]
 testito show   --run NAME [--json]
-testito tail   --run NAME       (when present — tails new step rows live)
+testito feedback --run NAME [--unseen] [--no-mark-seen] [--json]
+    Read the human's feedback on this run from the dashboard. The user can
+    type responses on individual findings or tests in the UI; this command
+    is how you pick up answers, follow-up instructions, or "ignore this and
+    move on" guidance. Default lists ALL feedback (and marks unseen as seen
+    on read). --unseen filters to just-new since your last call. --json gives
+    a machine-parseable shape with target_kind/target_id/target_name fields.
 ```
+
+After every `testito report`, the CLI prints a one-line nag to stderr if
+there's unseen feedback on the run — that's your signal to call
+`testito feedback --run X` before continuing.
 
 **Run metadata** (`[METADATA…]`) — pass on `start` or any `report`. The dashboard
 shows them in a banner so a reviewer knows *what* was tested.
@@ -124,6 +134,26 @@ shows them in a banner so a reviewer knows *what* was tested.
 ```
 
 Help: `testito --help`, `testito report --help`, etc.
+
+## Read feedback the human leaves
+
+The dashboard has a `💬 Add feedback` box on each finding and on each test header. The human uses it to ask you questions ("does this also reproduce on Safari?"), answer your own (`question` kind) findings ("yes, the 60-min expiry is intentional"), or hand you instructions ("skip the rest of this test, file a Linear ticket"). Treat their feedback as the authoritative voice in the room.
+
+**Workflow:**
+
+1. After every `testito report`, watch stderr for `👤 N unseen feedback item(s) on this run`. That's the dashboard's polite "hey".
+2. When you see it (or proactively before each test), run:
+   ```bash
+   testito feedback --run "$RUN" --unseen --json
+   ```
+   This returns the new feedback as JSON, grouped by target (note/test/run). Marks each as seen on read so the next `--unseen` call is empty unless the human added more.
+3. Act on each item:
+   - Question on one of YOUR findings → file the answer (e.g. `testito jot --run X --kind info --text "Re finding #3: confirmed expected behavior, see PRD link X."`).
+   - Instruction on a test → follow it. If they said "skip the rest", `testito report` the remaining steps as `--result skipped` with a note pointing at the feedback.
+   - Question to you → answer with `testito jot --kind info --text "..."` so the answer lives in the run.
+4. Don't ignore feedback. The human typed it because they want a response — silence here is exactly the failure mode this whole skill is fighting.
+
+`--no-mark-seen` peeks without acking — useful if you want to glance and come back. `testito feedback --run X` (no flags) lists every feedback item ever left on the run, in chronological order.
 
 ## How to test
 

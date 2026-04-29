@@ -15,7 +15,8 @@ mod storage;
 
 use db::Db;
 use models::{
-    relative_time, rollup, AttachmentTarget, Kind, Result as TestResult, RunMeta, RunStep, Scope,
+    relative_time, rollup, AttachmentTarget, FeedbackTarget, Kind, Result as TestResult, RunMeta,
+    RunStep, Scope,
 };
 
 #[derive(Parser, Debug)]
@@ -53,6 +54,11 @@ enum Cmd {
 
     /// Print one run's metadata, counts, failures, tests, and notes to stdout.
     Show(ShowArgs),
+
+    /// Read human feedback left on a run from the dashboard. Use this to
+    /// pick up answers to questions, follow-up instructions, or "ignore
+    /// this and move on" guidance from the user.
+    Feedback(FeedbackArgs),
 }
 
 #[derive(Args, Debug, Default)]
@@ -237,6 +243,29 @@ struct ListArgs {
 }
 
 #[derive(Args, Debug)]
+struct FeedbackArgs {
+    /// Run name.
+    #[arg(long)]
+    run: String,
+
+    /// Show only feedback the agent hasn't read yet. Marks them as seen on read.
+    #[arg(long)]
+    unseen: bool,
+
+    /// Don't mark feedback as seen — peek without acking.
+    #[arg(long)]
+    no_mark_seen: bool,
+
+    /// Print as JSON instead of human-readable text.
+    #[arg(long)]
+    json: bool,
+
+    /// SQLite database file (default: platform data dir).
+    #[arg(long)]
+    db: Option<PathBuf>,
+}
+
+#[derive(Args, Debug)]
 struct ShowArgs {
     /// Run name.
     #[arg(long)]
@@ -305,6 +334,10 @@ async fn main() -> Result<()> {
             let db_path = resolve_db(a.db.clone())?;
             cmd_show(db_path, a)
         }
+        Cmd::Feedback(a) => {
+            let db_path = resolve_db(a.db.clone())?;
+            cmd_feedback(db_path, a)
+        }
     }
 }
 
@@ -366,6 +399,18 @@ fn cmd_report(db_path: PathBuf, a: ReportArgs) -> Result<()> {
         attempt,
         attachments_suffix(attached),
     );
+    nag_about_feedback(&db, run_id, &run_name)?;
+    Ok(())
+}
+
+fn nag_about_feedback(db: &Db, run_id: i64, run_name: &str) -> Result<()> {
+    let n = db.unseen_feedback_count(run_id)?;
+    if n > 0 {
+        eprintln!(
+            "👤 {n} unseen feedback item{} on this run. Run `testito feedback --run \"{run_name}\"` to read.",
+            plural(n)
+        );
+    }
     Ok(())
 }
 
@@ -402,6 +447,109 @@ fn cmd_jot(db_path: PathBuf, a: JotArgs) -> Result<()> {
         kind.label(),
         attachments_suffix(attached),
     );
+    Ok(())
+}
+
+fn cmd_feedback(db_path: PathBuf, a: FeedbackArgs) -> Result<()> {
+    let db = Db::open(&db_path)?;
+    let run_id = db
+        .find_run_id(&a.run)?
+        .ok_or_else(|| anyhow::anyhow!("run '{}' does not exist", a.run))?;
+    let mut all = db.feedback_for_run(run_id)?;
+    if a.unseen {
+        all.retain(|f| f.seen_at.is_none());
+    }
+
+    if a.json {
+        // Build a structured payload; resolve target names so the agent can
+        // act without doing a second lookup.
+        let mut targets_note: std::collections::HashMap<i64, String> =
+            std::collections::HashMap::new();
+        let mut targets_test: std::collections::HashMap<i64, String> =
+            std::collections::HashMap::new();
+        for n in db.notes_for_run(run_id)? {
+            targets_note.insert(n.id, n.text.lines().next().unwrap_or("").to_string());
+        }
+        for t in db.run_tests(run_id)? {
+            targets_test.insert(t.id, t.name);
+        }
+        let payload = serde_json::json!({
+            "run": a.run,
+            "unseen_only": a.unseen,
+            "feedback": all.iter().map(|f| {
+                let target_name = match f.target_kind {
+                    FeedbackTarget::Note => targets_note.get(&f.target_id).cloned(),
+                    FeedbackTarget::Test => targets_test.get(&f.target_id).cloned(),
+                    FeedbackTarget::Run => Some(a.run.clone()),
+                };
+                serde_json::json!({
+                    "id": f.id,
+                    "target_kind": f.target_kind.as_str(),
+                    "target_id": f.target_id,
+                    "target_name": target_name,
+                    "text": f.text,
+                    "created_at": f.created_at,
+                    "seen_at": f.seen_at,
+                })
+            }).collect::<Vec<_>>(),
+        });
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+    } else if all.is_empty() {
+        println!(
+            "(no {}feedback on '{}')",
+            if a.unseen { "unseen " } else { "" },
+            a.run
+        );
+    } else {
+        // Group by target so each piece of feedback shows what it's about.
+        let notes: std::collections::HashMap<i64, String> = db
+            .notes_for_run(run_id)?
+            .into_iter()
+            .map(|n| {
+                let summary = format!(
+                    "{} {} {}",
+                    n.kind.emoji(),
+                    n.kind.label(),
+                    n.text.lines().next().unwrap_or("")
+                );
+                (n.id, summary)
+            })
+            .collect();
+        let tests: std::collections::HashMap<i64, String> = db
+            .run_tests(run_id)?
+            .into_iter()
+            .map(|t| (t.id, t.name))
+            .collect();
+
+        for f in &all {
+            let header = match f.target_kind {
+                FeedbackTarget::Note => format!(
+                    "on finding {}",
+                    notes.get(&f.target_id).cloned().unwrap_or_default()
+                ),
+                FeedbackTarget::Test => format!(
+                    "on test \"{}\"",
+                    tests.get(&f.target_id).cloned().unwrap_or_default()
+                ),
+                FeedbackTarget::Run => format!("on run {}", a.run),
+            };
+            let unread = if f.seen_at.is_none() { " (unread)" } else { "" };
+            println!("{header}{unread}");
+            println!("  {}", relative_time(&f.created_at));
+            for line in f.text.lines() {
+                println!("    {line}");
+            }
+            println!();
+        }
+    }
+
+    if !a.no_mark_seen {
+        let n = db.mark_run_feedback_seen(run_id)?;
+        if n > 0 && !a.json {
+            eprintln!("(marked {n} feedback item{} as seen)", plural(n));
+        }
+    }
+
     Ok(())
 }
 

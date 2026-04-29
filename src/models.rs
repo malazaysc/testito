@@ -230,11 +230,54 @@ pub struct RunStep {
 }
 
 /// What a screenshot is attached to. Stored as a string in the DB so we can
-/// extend the vocabulary later (e.g. "feedback" once those land).
+/// extend the vocabulary later.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AttachmentTarget {
     Note,
     Step,
+}
+
+/// What a piece of human feedback is attached to. Notes (findings), tests,
+/// and the run as a whole are the three things a reviewer might want to
+/// respond to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FeedbackTarget {
+    Note,
+    Test,
+    Run,
+}
+
+impl FeedbackTarget {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            FeedbackTarget::Note => "note",
+            FeedbackTarget::Test => "test",
+            FeedbackTarget::Run => "run",
+        }
+    }
+
+    pub fn parse(s: &str) -> anyhow::Result<Self> {
+        match s {
+            "note" | "finding" => Ok(FeedbackTarget::Note),
+            "test" => Ok(FeedbackTarget::Test),
+            "run" => Ok(FeedbackTarget::Run),
+            other => Err(anyhow::anyhow!(
+                "invalid feedback target '{}' — use note, test, or run",
+                other
+            )),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Feedback {
+    pub id: i64,
+    pub run_id: i64,
+    pub target_kind: FeedbackTarget,
+    pub target_id: i64,
+    pub text: String,
+    pub created_at: String,
+    pub seen_at: Option<String>,
 }
 
 impl AttachmentTarget {

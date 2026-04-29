@@ -171,6 +171,40 @@
     color: var(--fg);
   }
 
+  /* Feedback — human responses inline under findings + tests */
+  .pill-feedback { background: rgba(47,129,247,.18); color: var(--accent); border: 1px solid rgba(47,129,247,.40); }
+  .feedback-thread { margin-top: 0.6rem; }
+  .feedback-thread:empty { display: none; }
+  .feedback-item {
+    background: rgba(47,129,247,.06);
+    border: 1px solid rgba(47,129,247,.30);
+    border-left: 3px solid var(--accent);
+    border-radius: 5px;
+    padding: 0.55rem 0.75rem;
+    margin: 0.4rem 0;
+  }
+  .feedback-item-header {
+    display: flex; gap: 0.5rem; align-items: center; margin-bottom: 0.3rem;
+  }
+  .feedback-time { font-size: 0.72rem; }
+  .feedback-text { line-height: 1.55; }
+  .feedback-form { margin-top: 0.5rem; font-size: 0.85rem; }
+  .feedback-form > summary {
+    list-style: none; cursor: pointer;
+    color: var(--muted); padding: 0.25rem 0;
+  }
+  .feedback-form > summary:hover { color: var(--accent); }
+  .feedback-form > summary::-webkit-details-marker { display: none; }
+  .feedback-form form { display: flex; flex-direction: column; gap: 0.4rem; margin-top: 0.4rem; }
+  .feedback-form textarea { min-height: 4rem; resize: vertical; }
+  .feedback-form button {
+    align-self: flex-start;
+    background: var(--accent); color: white; border: 0;
+    padding: 0.35rem 0.85rem; border-radius: 4px;
+    cursor: pointer; font-size: 0.85rem; font-family: inherit;
+  }
+  .feedback-form button:disabled { opacity: 0.5; cursor: wait; }
+
   /* Attached screenshots — small thumbnails, click to open full size */
   .attachments {
     display: flex; gap: 0.5rem; flex-wrap: wrap;

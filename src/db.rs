@@ -4,8 +4,8 @@ use anyhow::Result;
 use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::models::{
-    Attachment, AttachmentTarget, Kind, Result as TestResult, Run, RunMeta, RunNote, RunStep,
-    RunTest, Scope,
+    Attachment, AttachmentTarget, Feedback, FeedbackTarget, Kind, Result as TestResult, Run,
+    RunMeta, RunNote, RunStep, RunTest, Scope,
 };
 
 pub struct Db {
@@ -99,6 +99,18 @@ CREATE TABLE IF NOT EXISTS attachments (
 );
 
 CREATE INDEX IF NOT EXISTS idx_attachments_target ON attachments(target_kind, target_id);
+
+CREATE TABLE IF NOT EXISTS feedback (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id INTEGER NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    target_kind TEXT NOT NULL,           -- 'note' | 'test' | 'run'
+    target_id INTEGER NOT NULL,
+    text TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    seen_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_feedback_run ON feedback(run_id);
 "#;
 
 const DROP_LEGACY: &str = r#"
@@ -330,6 +342,67 @@ impl Db {
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
+    }
+
+    pub fn insert_feedback(
+        &self,
+        run_id: i64,
+        target_kind: FeedbackTarget,
+        target_id: i64,
+        text: &str,
+    ) -> Result<i64> {
+        let now = chrono::Utc::now().to_rfc3339();
+        self.conn.execute(
+            "INSERT INTO feedback(run_id, target_kind, target_id, text, created_at)
+             VALUES(?1, ?2, ?3, ?4, ?5)",
+            params![run_id, target_kind.as_str(), target_id, text, now],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    pub fn feedback_for_run(&self, run_id: i64) -> Result<Vec<Feedback>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, run_id, target_kind, target_id, text, created_at, seen_at
+             FROM feedback WHERE run_id = ?1 ORDER BY created_at, id",
+        )?;
+        let rows = stmt.query_map(params![run_id], |r| {
+            Ok(Feedback {
+                id: r.get(0)?,
+                run_id: r.get(1)?,
+                target_kind: match r.get::<_, String>(2)?.as_str() {
+                    "test" => FeedbackTarget::Test,
+                    "run" => FeedbackTarget::Run,
+                    _ => FeedbackTarget::Note,
+                },
+                target_id: r.get(3)?,
+                text: r.get(4)?,
+                created_at: r.get(5)?,
+                seen_at: r.get(6)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Mark all currently-unseen feedback for a run as seen. Returns how many
+    /// rows were updated. Used by `testito feedback --run X` so the agent only
+    /// sees each piece of feedback once unless `--no-mark-seen` is passed.
+    pub fn mark_run_feedback_seen(&self, run_id: i64) -> Result<i64> {
+        let now = chrono::Utc::now().to_rfc3339();
+        let n = self.conn.execute(
+            "UPDATE feedback SET seen_at = ?1
+             WHERE run_id = ?2 AND seen_at IS NULL",
+            params![now, run_id],
+        )?;
+        Ok(n as i64)
+    }
+
+    pub fn unseen_feedback_count(&self, run_id: i64) -> Result<i64> {
+        let n: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM feedback WHERE run_id = ?1 AND seen_at IS NULL",
+            params![run_id],
+            |r| r.get(0),
+        )?;
+        Ok(n)
     }
 
     pub fn insert_attachment(

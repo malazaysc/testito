@@ -1,0 +1,7 @@
+<div class="feedback-item" data-feedback-id="{{ feedback.id }}">
+  <div class="feedback-item-header">
+    <span class="pill pill-feedback">👤 You</span>
+    <span class="muted feedback-time" title="{{ feedback.created_at }}">{{ relative_created }}</span>
+  </div>
+  <div class="feedback-text md-content">{{ text_html|safe }}</div>
+</div>

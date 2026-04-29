@@ -115,6 +115,32 @@
           {% endfor %}
         </div>
         {% endif %}
+
+        <div class="feedback-thread" id="feedback-note-{{ n.note.id }}">
+          {% for f in n.feedback %}
+            <div class="feedback-item" data-feedback-id="{{ f.feedback.id }}">
+              <div class="feedback-item-header">
+                <span class="pill pill-feedback">👤 You</span>
+                <span class="muted feedback-time" title="{{ f.feedback.created_at }}">{{ f.relative_created }}</span>
+              </div>
+              <div class="feedback-text md-content">{{ f.text_html|safe }}</div>
+            </div>
+          {% endfor %}
+        </div>
+        <details class="feedback-form" x-data="{ saving: false }">
+          <summary>💬 Add feedback</summary>
+          <form hx-post="/feedback"
+                hx-target="#feedback-note-{{ n.note.id }}"
+                hx-swap="beforeend"
+                @htmx:before-request="saving = true"
+                @htmx:after-request="saving = false; $event.target.reset(); $el.closest('details').open = false">
+            <input type="hidden" name="run_id" value="{{ run.id }}">
+            <input type="hidden" name="target_kind" value="note">
+            <input type="hidden" name="target_id" value="{{ n.note.id }}">
+            <textarea name="text" placeholder="Your feedback. Markdown supported." required></textarea>
+            <button type="submit" :disabled="saving">Save</button>
+          </form>
+        </details>
       </li>
     {% endfor %}
     </ul>
@@ -155,6 +181,32 @@
       </div>
       <div class="test-body-wrap" x-show="isOpen({{ t.test.id }})" x-cloak>
         <div class="test-body">
+          <div class="feedback-thread" id="feedback-test-{{ t.test.id }}">
+            {% for f in t.feedback %}
+              <div class="feedback-item" data-feedback-id="{{ f.feedback.id }}">
+                <div class="feedback-item-header">
+                  <span class="pill pill-feedback">👤 You</span>
+                  <span class="muted feedback-time" title="{{ f.feedback.created_at }}">{{ f.relative_created }}</span>
+                </div>
+                <div class="feedback-text md-content">{{ f.text_html|safe }}</div>
+              </div>
+            {% endfor %}
+          </div>
+          <details class="feedback-form" x-data="{ saving: false }">
+            <summary>💬 Add feedback for this test</summary>
+            <form hx-post="/feedback"
+                  hx-target="#feedback-test-{{ t.test.id }}"
+                  hx-swap="beforeend"
+                  @htmx:before-request="saving = true"
+                  @htmx:after-request="saving = false; $event.target.reset(); $el.closest('details').open = false">
+              <input type="hidden" name="run_id" value="{{ run.id }}">
+              <input type="hidden" name="target_kind" value="test">
+              <input type="hidden" name="target_id" value="{{ t.test.id }}">
+              <textarea name="text" placeholder="Your feedback. Markdown supported." required></textarea>
+              <button type="submit" :disabled="saving">Save</button>
+            </form>
+          </details>
+
           <div class="steps">
           {% for sr in t.steps %}
             <div class="step-row" data-result="{{ sr.step.result.as_str() }}" data-haystack="{{ sr.step.name }} {{ sr.step.note }}">
