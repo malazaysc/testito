@@ -10,7 +10,10 @@ use serde::Deserialize;
 use askama::Template;
 
 use crate::md;
-use crate::models::{relative_time, rollup, Result as TestResult, Run, RunNote, RunStep, RunTest};
+use crate::models::{
+    relative_time, rollup, Attachment, Result as TestResult, Run, RunNote, RunStep, RunTest,
+};
+use crate::storage;
 use crate::AppState;
 
 pub fn router(state: AppState) -> Router {
@@ -22,7 +25,26 @@ pub fn router(state: AppState) -> Router {
         .route("/runs/:id/export.md", get(export_markdown))
         .route("/compare", get(compare_page))
         .route("/compare/test", get(compare_test_fragment))
+        .route("/screenshots/:filename", get(serve_screenshot))
         .with_state(state)
+}
+
+async fn serve_screenshot(AxPath(filename): AxPath<String>) -> Response {
+    let (path, mime) = match storage::open_for_serving(&filename) {
+        Ok(v) => v,
+        Err(_) => return (StatusCode::NOT_FOUND, "screenshot not found").into_response(),
+    };
+    match tokio::fs::read(&path).await {
+        Ok(bytes) => (
+            [
+                (header::CONTENT_TYPE, mime),
+                (header::CACHE_CONTROL, "public, max-age=3600, immutable"),
+            ],
+            bytes,
+        )
+            .into_response(),
+        Err(_) => (StatusCode::NOT_FOUND, "screenshot not found").into_response(),
+    }
 }
 
 // ---------- error wrapper ----------
@@ -114,6 +136,7 @@ struct StepRow {
     step: RunStep,
     note_html: String,
     relative_reported: String,
+    attachments: Vec<Attachment>,
 }
 
 struct NoteRow {
@@ -124,6 +147,7 @@ struct NoteRow {
     /// so the template doesn't need to assemble it (and we don't ship the
     /// whole notes array to the client just for clipboard).
     copy_text: String,
+    attachments: Vec<Attachment>,
 }
 
 struct TestRow {
@@ -300,6 +324,10 @@ async fn build_run_body(state: &AppState, id: i64) -> Result<RunBodyTpl, AppErro
     let relative_started = relative_time(&run.started_at);
     let relative_completed = run.completed_at.as_deref().map(relative_time);
 
+    // One batched fetch for all attachments on this run, indexed by
+    // (target_kind, target_id) so the per-step / per-note loops are O(1).
+    let mut attachments_map = db.attachments_for_run(id)?;
+
     let mut tests_out = Vec::new();
     let mut counts = ResultCounts::default();
     let mut all_latest: Vec<RunStep> = Vec::new();
@@ -317,10 +345,14 @@ async fn build_run_body(state: &AppState, id: i64) -> Result<RunBodyTpl, AppErro
                 md::to_html(&s.note)
             };
             let relative_reported = relative_time(&s.reported_at);
+            let attachments = attachments_map
+                .remove(&("step".to_string(), s.id))
+                .unwrap_or_default();
             steps.push(StepRow {
                 step: s.clone(),
                 note_html,
                 relative_reported,
+                attachments,
             });
         }
         let rollup_status = rollup(&raw_steps);
@@ -355,11 +387,17 @@ async fn build_run_body(state: &AppState, id: i64) -> Result<RunBodyTpl, AppErro
     }
     let notes: Vec<NoteRow> = notes_raw
         .into_iter()
-        .map(|n| NoteRow {
-            text_html: md::to_html(&n.text),
-            relative_reported: relative_time(&n.reported_at),
-            copy_text: format!("[{}] {}", n.kind.label(), n.text),
-            note: n,
+        .map(|n| {
+            let attachments = attachments_map
+                .remove(&("note".to_string(), n.id))
+                .unwrap_or_default();
+            NoteRow {
+                text_html: md::to_html(&n.text),
+                relative_reported: relative_time(&n.reported_at),
+                copy_text: format!("[{}] {}", n.kind.label(), n.text),
+                attachments,
+                note: n,
+            }
         })
         .collect();
 

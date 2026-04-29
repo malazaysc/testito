@@ -3,7 +3,10 @@ use std::path::Path;
 use anyhow::Result;
 use rusqlite::{params, Connection, OptionalExtension};
 
-use crate::models::{Kind, Result as TestResult, Run, RunMeta, RunNote, RunStep, RunTest, Scope};
+use crate::models::{
+    Attachment, AttachmentTarget, Kind, Result as TestResult, Run, RunMeta, RunNote, RunStep,
+    RunTest, Scope,
+};
 
 pub struct Db {
     pub conn: Connection,
@@ -83,6 +86,19 @@ CREATE TABLE IF NOT EXISTS run_notes (
 );
 
 CREATE INDEX IF NOT EXISTS idx_run_notes_run ON run_notes(run_id);
+
+CREATE TABLE IF NOT EXISTS attachments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    target_kind TEXT NOT NULL,           -- 'note' | 'step'
+    target_id INTEGER NOT NULL,
+    filename TEXT NOT NULL,              -- '<sha256>.<ext>' on disk
+    original_filename TEXT NOT NULL,     -- what the agent passed in (display only)
+    mime_type TEXT NOT NULL,
+    bytes INTEGER NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_attachments_target ON attachments(target_kind, target_id);
 "#;
 
 const DROP_LEGACY: &str = r#"
@@ -314,6 +330,79 @@ impl Db {
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
+    }
+
+    pub fn insert_attachment(
+        &self,
+        target_kind: AttachmentTarget,
+        target_id: i64,
+        filename: &str,
+        original_filename: &str,
+        mime_type: &str,
+        bytes: i64,
+    ) -> Result<i64> {
+        let now = chrono::Utc::now().to_rfc3339();
+        self.conn.execute(
+            "INSERT INTO attachments(target_kind, target_id, filename, original_filename, mime_type, bytes, created_at)
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                target_kind.as_str(),
+                target_id,
+                filename,
+                original_filename,
+                mime_type,
+                bytes,
+                now,
+            ],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Read all attachments for the targets in a single run, returning a map
+    /// keyed by `(target_kind, target_id)`. A single batched fetch beats
+    /// N+1 lookups when the page renders dozens of notes and steps.
+    pub fn attachments_for_run(
+        &self,
+        run_id: i64,
+    ) -> Result<std::collections::HashMap<(String, i64), Vec<Attachment>>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT a.id, a.target_kind, a.target_id, a.filename, a.original_filename,
+                    a.mime_type, a.bytes, a.created_at
+             FROM attachments a
+             WHERE
+                (a.target_kind = 'note' AND a.target_id IN (SELECT id FROM run_notes WHERE run_id = ?1))
+                OR
+                (a.target_kind = 'step' AND a.target_id IN (
+                    SELECT s.id FROM run_steps s
+                    JOIN run_tests t ON s.run_test_id = t.id
+                    WHERE t.run_id = ?1
+                ))
+             ORDER BY a.id",
+        )?;
+        let rows = stmt.query_map(params![run_id], |r| {
+            Ok(Attachment {
+                id: r.get(0)?,
+                target_kind: match r.get::<_, String>(1)?.as_str() {
+                    "step" => AttachmentTarget::Step,
+                    _ => AttachmentTarget::Note,
+                },
+                target_id: r.get(2)?,
+                filename: r.get(3)?,
+                original_filename: r.get(4)?,
+                mime_type: r.get(5)?,
+                bytes: r.get(6)?,
+                created_at: r.get(7)?,
+            })
+        })?;
+        let mut out: std::collections::HashMap<(String, i64), Vec<Attachment>> =
+            std::collections::HashMap::new();
+        for a in rows {
+            let a = a?;
+            out.entry((a.target_kind.as_str().to_string(), a.target_id))
+                .or_default()
+                .push(a);
+        }
+        Ok(out)
     }
 
     /// Stream read for `testito tail`: step rows whose id is greater than

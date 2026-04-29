@@ -11,9 +11,12 @@ mod db;
 mod md;
 mod models;
 mod routes;
+mod storage;
 
 use db::Db;
-use models::{relative_time, rollup, Kind, Result as TestResult, RunMeta, RunStep, Scope};
+use models::{
+    relative_time, rollup, AttachmentTarget, Kind, Result as TestResult, RunMeta, RunStep, Scope,
+};
 
 #[derive(Parser, Debug)]
 #[command(name = "testito", version, about = "Manual testing log for AI agents")]
@@ -138,6 +141,11 @@ struct ReportArgs {
     #[arg(long)]
     note: Option<String>,
 
+    /// Path to a screenshot to attach to this step. Repeatable. The file is
+    /// copied into testito's storage dir; the original is no longer needed.
+    #[arg(long = "screenshot")]
+    screenshots: Vec<PathBuf>,
+
     #[command(flatten)]
     meta: MetaArgs,
 
@@ -164,6 +172,10 @@ struct NoteArgs {
     #[arg(long)]
     text: String,
 
+    /// Path to a screenshot to attach. Repeatable.
+    #[arg(long = "screenshot")]
+    screenshots: Vec<PathBuf>,
+
     /// SQLite database file (default: platform data dir).
     #[arg(long)]
     db: Option<PathBuf>,
@@ -183,6 +195,10 @@ struct JotArgs {
     /// Bugs surface first in the dashboard so the human can triage at a glance.
     #[arg(long, default_value = "info")]
     kind: String,
+
+    /// Path to a screenshot to attach. Repeatable.
+    #[arg(long = "screenshot")]
+    screenshots: Vec<PathBuf>,
 
     /// SQLite database file (default: platform data dir).
     #[arg(long)]
@@ -340,13 +356,15 @@ fn cmd_report(db_path: PathBuf, a: ReportArgs) -> Result<()> {
         result,
         a.note.as_deref().unwrap_or(""),
     )?;
+    let attached = ingest_attachments(&db, AttachmentTarget::Step, step_id, &a.screenshots)?;
     println!(
-        "{} · run={} test={} step #{} attempt={}",
+        "{} · run={} test={} step #{} attempt={}{}",
         result.label(),
         run_name,
         test_name,
         step_id,
-        attempt
+        attempt,
+        attachments_suffix(attached),
     );
     Ok(())
 }
@@ -357,13 +375,15 @@ fn cmd_note(db_path: PathBuf, a: NoteArgs) -> Result<()> {
     let db = Db::open(&db_path)?;
     let run_id = db.ensure_run(&a.run, &RunMeta::default())?;
     let id = db.append_note(run_id, scope, kind, &a.text)?;
+    let attached = ingest_attachments(&db, AttachmentTarget::Note, id, &a.screenshots)?;
     println!(
-        "note #{} on {} ({} {} {})",
+        "note #{} on {} ({} {} {}){}",
         id,
         a.run,
         kind.emoji(),
         kind.label(),
         scope.as_str(),
+        attachments_suffix(attached),
     );
     Ok(())
 }
@@ -373,14 +393,44 @@ fn cmd_jot(db_path: PathBuf, a: JotArgs) -> Result<()> {
     let db = Db::open(&db_path)?;
     let run_id = db.ensure_run(&a.run, &RunMeta::default())?;
     let id = db.append_note(run_id, Scope::Out, kind, &a.text)?;
+    let attached = ingest_attachments(&db, AttachmentTarget::Note, id, &a.screenshots)?;
     println!(
-        "jotted #{} on {} ({} {})",
+        "jotted #{} on {} ({} {}){}",
         id,
         a.run,
         kind.emoji(),
         kind.label(),
+        attachments_suffix(attached),
     );
     Ok(())
+}
+
+fn ingest_attachments(
+    db: &Db,
+    target_kind: AttachmentTarget,
+    target_id: i64,
+    paths: &[PathBuf],
+) -> Result<usize> {
+    for p in paths {
+        let ingested = storage::ingest_screenshot(p)?;
+        db.insert_attachment(
+            target_kind,
+            target_id,
+            &ingested.filename(),
+            &ingested.original_filename,
+            &ingested.mime_type,
+            ingested.bytes_written as i64,
+        )?;
+    }
+    Ok(paths.len())
+}
+
+fn attachments_suffix(n: usize) -> String {
+    if n == 0 {
+        String::new()
+    } else {
+        format!(" · 📎 {} screenshot{}", n, if n == 1 { "" } else { "s" })
+    }
 }
 
 fn cmd_end(db_path: PathBuf, a: EndArgs) -> Result<()> {

@@ -171,6 +171,24 @@
     color: var(--fg);
   }
 
+  /* Attached screenshots — small thumbnails, click to open full size */
+  .attachments {
+    display: flex; gap: 0.5rem; flex-wrap: wrap;
+    margin-top: 0.5rem;
+  }
+  .attachments a {
+    display: inline-block; line-height: 0;
+    border: 1px solid var(--border); border-radius: 4px;
+    overflow: hidden; transition: border-color 0.15s, transform 0.15s;
+  }
+  .attachments a:hover {
+    border-color: var(--accent); transform: translateY(-1px);
+  }
+  .attachments img {
+    display: block; max-width: 220px; max-height: 140px;
+    background: #0d1117;
+  }
+
   /* Each note row has a thin colored accent on the left edge so the eye can
      scan a list of notes by kind without reading them. */
   .note-row { position: relative; padding-left: 0.7rem; }

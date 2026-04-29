@@ -105,6 +105,16 @@
                   onclick="copyFromAttr(this)">📋 copy</button>
         </div>
         <div class="note-text md-content">{{ n.text_html|safe }}</div>
+        {% if !n.attachments.is_empty() %}
+        <div class="attachments">
+          {% for a in n.attachments %}
+            <a href="/screenshots/{{ a.filename }}" target="_blank" rel="noopener noreferrer"
+               title="{{ a.original_filename }} — click to open full size">
+              <img src="/screenshots/{{ a.filename }}" alt="{{ a.original_filename }}" loading="lazy">
+            </a>
+          {% endfor %}
+        </div>
+        {% endif %}
       </li>
     {% endfor %}
     </ul>
@@ -157,6 +167,16 @@
               </div>
               {% if !sr.note_html.is_empty() %}
                 <div class="step-note-display md-content">{{ sr.note_html|safe }}</div>
+              {% endif %}
+              {% if !sr.attachments.is_empty() %}
+              <div class="attachments">
+                {% for a in sr.attachments %}
+                  <a href="/screenshots/{{ a.filename }}" target="_blank" rel="noopener noreferrer"
+                     title="{{ a.original_filename }} — click to open full size">
+                    <img src="/screenshots/{{ a.filename }}" alt="{{ a.original_filename }}" loading="lazy">
+                  </a>
+                {% endfor %}
+              </div>
               {% endif %}
             </div>
           {% endfor %}

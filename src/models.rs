@@ -229,6 +229,36 @@ pub struct RunStep {
     pub reported_at: String,
 }
 
+/// What a screenshot is attached to. Stored as a string in the DB so we can
+/// extend the vocabulary later (e.g. "feedback" once those land).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AttachmentTarget {
+    Note,
+    Step,
+}
+
+impl AttachmentTarget {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            AttachmentTarget::Note => "note",
+            AttachmentTarget::Step => "step",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Attachment {
+    pub id: i64,
+    pub target_kind: AttachmentTarget,
+    pub target_id: i64,
+    /// `<sha256>.<ext>` — the filename used both on disk and in URLs.
+    pub filename: String,
+    pub original_filename: String,
+    pub mime_type: String,
+    pub bytes: i64,
+    pub created_at: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct RunNote {
     pub id: i64,
