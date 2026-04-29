@@ -13,7 +13,7 @@ mod models;
 mod routes;
 
 use db::Db;
-use models::{relative_time, rollup, Result as TestResult, RunMeta, RunStep, Scope};
+use models::{relative_time, rollup, Kind, Result as TestResult, RunMeta, RunStep, Scope};
 
 #[derive(Parser, Debug)]
 #[command(name = "testito", version, about = "Manual testing log for AI agents")]
@@ -156,6 +156,10 @@ struct NoteArgs {
     #[arg(long, default_value = "in")]
     scope: String,
 
+    /// What kind of observation: bug, polish, question, or info (default).
+    #[arg(long, default_value = "info")]
+    kind: String,
+
     /// The note text.
     #[arg(long)]
     text: String,
@@ -174,6 +178,11 @@ struct JotArgs {
     /// The observation. Markdown is rendered in the dashboard.
     #[arg(long)]
     text: String,
+
+    /// What kind of observation: bug, polish, question, or info (default).
+    /// Bugs surface first in the dashboard so the human can triage at a glance.
+    #[arg(long, default_value = "info")]
+    kind: String,
 
     /// SQLite database file (default: platform data dir).
     #[arg(long)]
@@ -344,18 +353,33 @@ fn cmd_report(db_path: PathBuf, a: ReportArgs) -> Result<()> {
 
 fn cmd_note(db_path: PathBuf, a: NoteArgs) -> Result<()> {
     let scope = Scope::parse(&a.scope)?;
+    let kind = Kind::parse(&a.kind)?;
     let db = Db::open(&db_path)?;
     let run_id = db.ensure_run(&a.run, &RunMeta::default())?;
-    let id = db.append_note(run_id, scope, &a.text)?;
-    println!("note #{} on {} ({})", id, a.run, scope.as_str());
+    let id = db.append_note(run_id, scope, kind, &a.text)?;
+    println!(
+        "note #{} on {} ({} {} {})",
+        id,
+        a.run,
+        kind.emoji(),
+        kind.label(),
+        scope.as_str(),
+    );
     Ok(())
 }
 
 fn cmd_jot(db_path: PathBuf, a: JotArgs) -> Result<()> {
+    let kind = Kind::parse(&a.kind)?;
     let db = Db::open(&db_path)?;
     let run_id = db.ensure_run(&a.run, &RunMeta::default())?;
-    let id = db.append_note(run_id, Scope::Out, &a.text)?;
-    println!("jotted #{} on {} (out of scope)", id, a.run);
+    let id = db.append_note(run_id, Scope::Out, kind, &a.text)?;
+    println!(
+        "jotted #{} on {} ({} {})",
+        id,
+        a.run,
+        kind.emoji(),
+        kind.label(),
+    );
     Ok(())
 }
 
@@ -400,6 +424,14 @@ fn cmd_end(db_path: PathBuf, a: EndArgs) -> Result<()> {
         std::process::exit(1);
     }
     Ok(())
+}
+
+fn plural(n: i64) -> &'static str {
+    if n == 1 {
+        ""
+    } else {
+        "s"
+    }
 }
 
 fn compute_run_rollup(db: &Db, run_id: i64) -> Result<Option<TestResult>> {
@@ -593,28 +625,44 @@ fn cmd_show(db_path: PathBuf, a: ShowArgs) -> Result<()> {
         "Counts: {} pass · {} fail · {} warn · {} skip",
         counts.0, counts.1, counts.2, counts.3
     );
-    let findings = notes.iter().filter(|n| n.scope == Scope::Out).count();
-    if findings > 0 {
-        println!(
-            "Findings: 📋 {} observation{} filed outside the test brief — review them.",
-            findings,
-            if findings == 1 { "" } else { "s" }
-        );
-    } else {
+    // Per-kind breakdown — bugs first so they hit the eye.
+    let mut by_kind: [i64; 4] = [0; 4];
+    for n in &notes {
+        by_kind[n.kind.sort_priority() as usize] += 1;
+    }
+    if notes.is_empty() {
         println!("Findings: ✓ none filed");
+    } else {
+        let mut parts = Vec::new();
+        if by_kind[0] > 0 {
+            parts.push(format!("🐛 {} bug{}", by_kind[0], plural(by_kind[0])));
+        }
+        if by_kind[1] > 0 {
+            parts.push(format!("✏️ {} polish", by_kind[1]));
+        }
+        if by_kind[2] > 0 {
+            parts.push(format!("❓ {} question{}", by_kind[2], plural(by_kind[2])));
+        }
+        if by_kind[3] > 0 {
+            parts.push(format!("ℹ️  {} info", by_kind[3]));
+        }
+        println!("Findings: {}", parts.join(" · "));
     }
 
     // Findings & notes — surfaced before the long test list because the agent's
     // tangential observations are usually what the human actually wants to read.
+    // Sorted by triage priority (bugs first), then chronological within each kind.
     if !notes.is_empty() {
+        let mut sorted_notes = notes.clone();
+        sorted_notes.sort_by_key(|n| n.kind.sort_priority());
         println!();
         println!("Findings & notes:");
-        for n in &notes {
-            let tag = match n.scope {
-                Scope::In => "[in] ",
-                Scope::Out => "[out]",
+        for n in &sorted_notes {
+            let scope_tag = match n.scope {
+                Scope::In => "in",
+                Scope::Out => "out",
             };
-            print!("  {tag} ");
+            print!("  {} {} [{}] ", n.kind.emoji(), n.kind.label(), scope_tag);
             let mut lines = n.text.lines();
             if let Some(first) = lines.next() {
                 println!("{first}");
@@ -622,7 +670,7 @@ fn cmd_show(db_path: PathBuf, a: ShowArgs) -> Result<()> {
                 println!();
             }
             for line in lines {
-                println!("        {line}");
+                println!("              {line}");
             }
         }
     }

@@ -22,13 +22,30 @@ While you test, you will see things outside the explicit brief — a typo, an un
 
 **The cost of silence is much higher than the cost of a tangential note.** Out-of-scope notes:
 - do not affect the run's pass/fail status
-- do not slow you down (`testito jot --run "<name>" --text "..."` is one command, run it as you go)
-- do not pollute the test results — they live in a dedicated Notes section
+- do not slow you down (`testito jot --run "<name>" --text "..." --kind <bug|polish|question|info>` is one command, run it as you go)
+- do not pollute the test results — they live in a dedicated Findings & notes section
 - can be filed even after the run is complete
 
 The cost of NOT filing is real: the user has to ask you again, sometimes several times, until they trust the run is clean. That round-trip is far more expensive than 10 jot calls.
 
 **Default to filing.** If you're hesitating ("is this worth reporting?") — yes, it is, jot it.
+
+### Tag every finding with a kind
+
+`testito jot` and `testito note` both take `--kind`. **Always pass it explicitly.** The dashboard sorts and colors findings by kind — bugs first, then polish, then questions, then info — so a human reviewer can triage without reading prose.
+
+The four kinds, with the rule for picking:
+
+- **`bug`** — *if you'd say "this is wrong"*. Something that looks broken, regressed, or in error. Console errors, 5xx responses, broken layouts, copy that contradicts behavior.
+- **`polish`** — *if you'd say "this could be nicer"*. Works correctly but rough: typos, alignment off by a few px, awkward copy, jank, missing focus state.
+- **`question`** — *if you'd say "is this right?"*. You're not sure if it's a bug or by design — wants human eyes.
+- **`info`** — *if you'd say "for the record"*. Context, not a finding. "Tried X, it worked." "Reproduced this on Chrome 120." Default if you forget the flag, but prefer choosing.
+
+If you'd reach for two kinds, prefer the louder one (`bug` > `polish` > `question` > `info`).
+
+### Lead with the conclusion in your note text
+
+The first line of every note shows up first in the dashboard. **Lead with what you saw, in one line, then expand.** Good: `"Footer copyright says 2024 on /login (expected current year)."` — followed by any details on a new paragraph. Bad: a multi-paragraph preamble that buries the actual finding.
 
 ### Examples that should always be jotted
 
@@ -74,12 +91,14 @@ testito report --run "<name>" --test "<scenario>" --step "<action>"
               --result <pass|fail|warning|skipped> [--attempt N] [--note "..."] [METADATA…]
     The main verb. Call this once per step as you go.
 
-testito jot --run "<name>" --text "..."
+testito jot --run "<name>" --text "..." --kind <bug|polish|question|info>
     *** Use this freely. *** One-line, low-friction filing of an out-of-scope
     observation. Markdown is rendered in the dashboard. There is no downside
     to jotting too much; there is real downside to jotting too little.
+    --kind defaults to info, but pass it explicitly so the dashboard can
+    triage by it.
 
-testito note --run "<name>" --scope <in|out> --text "..."
+testito note --run "<name>" --scope <in|out> --kind <...> --text "..."
     Same idea but explicit about scope. Use scope=in for findings within the
     testing brief that don't fit the step grain (e.g. "login is unusually
     slow on first load"). Use scope=out (or just `jot`) for tangential
@@ -155,7 +174,7 @@ testito report --run "$RUN" \
   --step "navigate to /login" --result pass
 
 # I noticed something tangential while loading the page — file it now, don't wait
-testito jot --run "$RUN" \
+testito jot --run "$RUN" --kind polish \
   --text "Login page logo is slightly blurry on retina; suspect missing 2x asset."
 
 testito report --run "$RUN" \
@@ -182,10 +201,15 @@ testito report --run "$RUN" \
   --step "reset email arrives within 30s" --result pass --attempt 2 \
   --note "Arrived in ~12s after worker restart."
 
-# More tangential things noticed during the session
-testito jot --run "$RUN" --text "Footer copyright still says **2024** on the login page."
-testito jot --run "$RUN" --text "Reset email subject is 'Reset Your Password.' (lowercase Y in actual mail), inconsistent with the heading."
-testito jot --run "$RUN" --text "Console: \`Warning: validateDOMNesting(...): <div> cannot appear as a descendant of <p>.\` on /reset."
+# More tangential things noticed during the session — note the explicit --kind
+testito jot --run "$RUN" --kind polish \
+  --text "Footer copyright still says **2024** on the login page."
+testito jot --run "$RUN" --kind polish \
+  --text "Reset email subject is 'Reset Your Password.' (lowercase Y in actual mail), inconsistent with the heading."
+testito jot --run "$RUN" --kind bug \
+  --text "Console: \`Warning: validateDOMNesting(...): <div> cannot appear as a descendant of <p>.\` on /reset."
+testito jot --run "$RUN" --kind question \
+  --text "Reset link expires after 60 min — is that intentional? Couldn't find it documented."
 
 # Walk the pre-end checklist above. Jot anything else. THEN:
 testito end --run "$RUN"

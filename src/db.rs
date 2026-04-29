@@ -3,7 +3,7 @@ use std::path::Path;
 use anyhow::Result;
 use rusqlite::{params, Connection, OptionalExtension};
 
-use crate::models::{Result as TestResult, Run, RunMeta, RunNote, RunStep, RunTest, Scope};
+use crate::models::{Kind, Result as TestResult, Run, RunMeta, RunNote, RunStep, RunTest, Scope};
 
 pub struct Db {
     pub conn: Connection,
@@ -77,6 +77,7 @@ CREATE TABLE IF NOT EXISTS run_notes (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     run_id INTEGER NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
     scope TEXT NOT NULL,
+    kind TEXT NOT NULL DEFAULT 'info',
     text TEXT NOT NULL,
     reported_at TEXT NOT NULL
 );
@@ -121,6 +122,14 @@ impl Db {
                     [],
                 )?;
             }
+        }
+        // Migrate existing run_notes tables to add the kind column (default 'info'
+        // so legacy notes show up as informational rather than triaged).
+        if !column_exists(&conn, "run_notes", "kind")? {
+            conn.execute(
+                "ALTER TABLE run_notes ADD COLUMN kind TEXT NOT NULL DEFAULT 'info'",
+                [],
+            )?;
         }
         Ok(Self { conn })
     }
@@ -215,11 +224,12 @@ impl Db {
         Ok(self.conn.last_insert_rowid())
     }
 
-    pub fn append_note(&self, run_id: i64, scope: Scope, text: &str) -> Result<i64> {
+    pub fn append_note(&self, run_id: i64, scope: Scope, kind: Kind, text: &str) -> Result<i64> {
         let now = chrono::Utc::now().to_rfc3339();
         self.conn.execute(
-            "INSERT INTO run_notes(run_id, scope, text, reported_at) VALUES(?1, ?2, ?3, ?4)",
-            params![run_id, scope.as_str(), text, now],
+            "INSERT INTO run_notes(run_id, scope, kind, text, reported_at)
+             VALUES(?1, ?2, ?3, ?4, ?5)",
+            params![run_id, scope.as_str(), kind.as_str(), text, now],
         )?;
         Ok(self.conn.last_insert_rowid())
     }
@@ -288,7 +298,7 @@ impl Db {
 
     pub fn notes_for_run(&self, run_id: i64) -> Result<Vec<RunNote>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, run_id, scope, text, reported_at FROM run_notes
+            "SELECT id, run_id, scope, kind, text, reported_at FROM run_notes
              WHERE run_id = ?1 ORDER BY reported_at, id",
         )?;
         let rows = stmt
@@ -297,8 +307,9 @@ impl Db {
                     id: r.get(0)?,
                     run_id: r.get(1)?,
                     scope: Scope::parse(&r.get::<_, String>(2)?).unwrap_or(Scope::In),
-                    text: r.get(3)?,
-                    reported_at: r.get(4)?,
+                    kind: Kind::parse(&r.get::<_, String>(3)?).unwrap_or(Kind::Info),
+                    text: r.get(4)?,
+                    reported_at: r.get(5)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -340,7 +351,7 @@ impl Db {
     /// ordered by id ascending.
     pub fn notes_after(&self, run_id: i64, after_id: i64) -> Result<Vec<RunNote>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, run_id, scope, text, reported_at FROM run_notes
+            "SELECT id, run_id, scope, kind, text, reported_at FROM run_notes
              WHERE run_id = ?1 AND id > ?2 ORDER BY id",
         )?;
         let rows = stmt
@@ -349,8 +360,9 @@ impl Db {
                     id: r.get(0)?,
                     run_id: r.get(1)?,
                     scope: Scope::parse(&r.get::<_, String>(2)?).unwrap_or(Scope::In),
-                    text: r.get(3)?,
-                    reported_at: r.get(4)?,
+                    kind: Kind::parse(&r.get::<_, String>(3)?).unwrap_or(Kind::Info),
+                    text: r.get(4)?,
+                    reported_at: r.get(5)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -493,17 +505,73 @@ mod tests {
     }
 
     #[test]
-    fn append_note_stores_scope_and_text() {
+    fn append_note_stores_scope_kind_and_text() {
         let (_dir, db) = open_temp();
         let r = db.ensure_run("r", &RunMeta::default()).unwrap();
-        db.append_note(r, Scope::In, "in scope finding").unwrap();
-        db.append_note(r, Scope::Out, "out of scope finding")
+        db.append_note(r, Scope::In, Kind::Info, "in scope finding")
+            .unwrap();
+        db.append_note(r, Scope::Out, Kind::Bug, "out of scope finding")
             .unwrap();
         let notes = db.notes_for_run(r).unwrap();
         assert_eq!(notes.len(), 2);
         let scopes: Vec<Scope> = notes.iter().map(|n| n.scope).collect();
+        let kinds: Vec<Kind> = notes.iter().map(|n| n.kind).collect();
         assert!(scopes.contains(&Scope::In));
         assert!(scopes.contains(&Scope::Out));
+        assert!(kinds.contains(&Kind::Info));
+        assert!(kinds.contains(&Kind::Bug));
+    }
+
+    #[test]
+    fn migration_adds_kind_to_legacy_run_notes() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("t.db");
+        // Pre-create a run_notes table that lacks the kind column.
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE runs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL UNIQUE,
+                    description TEXT NOT NULL DEFAULT '',
+                    started_at TEXT NOT NULL,
+                    completed_at TEXT
+                );
+                 CREATE TABLE run_tests (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    run_id INTEGER NOT NULL,
+                    name TEXT NOT NULL,
+                    first_reported_at TEXT NOT NULL,
+                    UNIQUE(run_id, name));
+                 CREATE TABLE run_steps (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    run_test_id INTEGER NOT NULL,
+                    name TEXT NOT NULL,
+                    attempt INTEGER NOT NULL DEFAULT 1,
+                    result TEXT NOT NULL,
+                    note TEXT NOT NULL DEFAULT '',
+                    reported_at TEXT NOT NULL);
+                 CREATE TABLE run_notes (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    run_id INTEGER NOT NULL,
+                    scope TEXT NOT NULL,
+                    text TEXT NOT NULL,
+                    reported_at TEXT NOT NULL);
+                 INSERT INTO runs(name, started_at) VALUES('legacy', '2026-01-01T00:00:00Z');
+                 INSERT INTO run_notes(run_id, scope, text, reported_at)
+                    VALUES(1, 'in', 'pre-kind note', '2026-01-01T00:00:01Z');",
+            )
+            .unwrap();
+        }
+        let db = Db::open(&path).unwrap();
+        let notes = db.notes_for_run(1).unwrap();
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].kind, Kind::Info, "legacy notes default to info");
+        // Now write a new note with an explicit kind and read it back.
+        db.append_note(1, Scope::Out, Kind::Bug, "new bug").unwrap();
+        let notes = db.notes_for_run(1).unwrap();
+        assert_eq!(notes.len(), 2);
+        assert!(notes.iter().any(|n| n.kind == Kind::Bug));
     }
 
     #[test]
@@ -526,7 +594,7 @@ mod tests {
         let t = db.ensure_test(a, "x").unwrap();
         db.append_step(t, "s1", 1, TestResult::Pass, "").unwrap();
         db.append_step(t, "s2", 1, TestResult::Fail, "").unwrap();
-        db.append_note(a, Scope::In, "n").unwrap();
+        db.append_note(a, Scope::In, Kind::Info, "n").unwrap();
 
         let runs = db.list_runs().unwrap();
         assert_eq!(runs.len(), 2);

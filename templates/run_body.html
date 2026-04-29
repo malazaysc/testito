@@ -6,9 +6,12 @@
         <span class="pill pill-{{ s.as_str() }}" style="font-size: 0.85rem;">{{ s.label() }}</span>
       {% when None %}
     {% endmatch %}
-    {% if findings > 0 %}
-      <a href="#findings" class="pill pill-findings" title="Out-of-scope observations the agent filed">
-        📋 {{ findings }} finding{% if findings != 1 %}s{% endif %}
+    {% if kind_counts.total() > 0 %}
+      <a href="#findings" class="kind-counts" title="Click to jump to findings & notes">
+        {% if kind_counts.bug      > 0 %}<span class="pill pill-kind-bug">🐛 {{ kind_counts.bug }}</span>{% endif %}
+        {% if kind_counts.polish   > 0 %}<span class="pill pill-kind-polish">✏️ {{ kind_counts.polish }}</span>{% endif %}
+        {% if kind_counts.question > 0 %}<span class="pill pill-kind-question">❓ {{ kind_counts.question }}</span>{% endif %}
+        {% if kind_counts.info     > 0 %}<span class="pill pill-kind-info">ℹ️ {{ kind_counts.info }}</span>{% endif %}
       </a>
     {% endif %}
   </div>
@@ -68,12 +71,17 @@
   <div class="card" style="padding: 0.5rem 0.85rem;">
     <ul class="bare">
     {% for n in notes %}
-      <li class="note-row">
+      <li class="note-row note-kind-{{ n.note.kind.as_str() }}">
         <div class="note-header">
-          {% match n.note.scope %}
-            {% when crate::models::Scope::In %}<span class="pill pill-in-scope">in scope</span>
-            {% when crate::models::Scope::Out %}<span class="pill pill-warning">out of scope</span>
-          {% endmatch %}
+          <span class="pill pill-kind-{{ n.note.kind.as_str() }}">
+            {{ n.note.kind.emoji() }} {{ n.note.kind.label() }}
+          </span>
+          <span class="muted note-scope">
+            {% match n.note.scope %}
+              {% when crate::models::Scope::In %}in scope
+              {% when crate::models::Scope::Out %}out of scope
+            {% endmatch %}
+          </span>
           <span class="muted note-time" title="{{ n.note.reported_at }}">{{ n.relative_reported }}</span>
         </div>
         <div class="note-text md-content">{{ n.text_html|safe }}</div>

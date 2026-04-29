@@ -65,9 +65,30 @@ struct RunRow {
     relative_started: String,
     rollup: Option<TestResult>,
     counts: ResultCounts,
-    /// Out-of-scope notes — surfaced prominently on the home table because
-    /// they're usually the agent's tangential bug findings.
-    findings: i64,
+    /// Per-kind breakdown of notes — drives the Findings column on the home table.
+    kind_counts: KindCounts,
+}
+
+#[derive(Default, Clone, Copy)]
+struct KindCounts {
+    bug: i64,
+    polish: i64,
+    question: i64,
+    info: i64,
+}
+
+impl KindCounts {
+    fn add(&mut self, k: crate::models::Kind) {
+        match k {
+            crate::models::Kind::Bug => self.bug += 1,
+            crate::models::Kind::Polish => self.polish += 1,
+            crate::models::Kind::Question => self.question += 1,
+            crate::models::Kind::Info => self.info += 1,
+        }
+    }
+    fn total(&self) -> i64 {
+        self.bug + self.polish + self.question + self.info
+    }
 }
 
 #[derive(Default, Clone)]
@@ -135,6 +156,7 @@ struct RunTpl {
     rollup: Option<TestResult>,
     other_runs: Vec<Run>,
     findings: i64,
+    kind_counts: KindCounts,
 }
 
 #[derive(Template)]
@@ -148,6 +170,7 @@ struct RunBodyTpl {
     counts: ResultCounts,
     rollup: Option<TestResult>,
     findings: i64,
+    kind_counts: KindCounts,
 }
 
 #[derive(Template)]
@@ -209,17 +232,17 @@ async fn build_run_rows(state: &AppState) -> Result<Vec<RunRow>, AppError> {
         }
         let rollup = rollup(&all_steps);
         let relative_started = relative_time(&r.started_at);
-        let findings = db
-            .notes_for_run(r.id)?
-            .into_iter()
-            .filter(|n| matches!(n.scope, crate::models::Scope::Out))
-            .count() as i64;
+        let notes_for_r = db.notes_for_run(r.id)?;
+        let mut kind_counts = KindCounts::default();
+        for n in &notes_for_r {
+            kind_counts.add(n.kind);
+        }
         out.push(RunRow {
             run: r,
             relative_started,
             rollup,
             counts,
-            findings,
+            kind_counts,
         });
     }
     Ok(out)
@@ -247,6 +270,7 @@ async fn run_page(
         rollup: body.rollup,
         other_runs,
         findings: body.findings,
+        kind_counts: body.kind_counts,
     }))
 }
 
@@ -306,11 +330,19 @@ async fn build_run_body(state: &AppState, id: i64) -> Result<RunBodyTpl, AppErro
         });
     }
 
-    let notes_raw = db.notes_for_run(id)?;
+    let mut notes_raw = db.notes_for_run(id)?;
+    // Sort by triage priority (bugs first, polish, question, info), then
+    // chronologically within each kind. Stable sort over a chronologically-
+    // ordered list preserves time order inside each bucket.
+    notes_raw.sort_by_key(|n| n.kind.sort_priority());
     let findings = notes_raw
         .iter()
         .filter(|n| matches!(n.scope, crate::models::Scope::Out))
         .count() as i64;
+    let mut kind_counts = KindCounts::default();
+    for n in &notes_raw {
+        kind_counts.add(n.kind);
+    }
     let notes: Vec<NoteRow> = notes_raw
         .into_iter()
         .map(|n| NoteRow {
@@ -331,6 +363,7 @@ async fn build_run_body(state: &AppState, id: i64) -> Result<RunBodyTpl, AppErro
         counts,
         rollup: run_rollup,
         findings,
+        kind_counts,
     })
 }
 

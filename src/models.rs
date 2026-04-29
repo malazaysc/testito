@@ -75,6 +75,68 @@ impl Scope {
     }
 }
 
+/// What kind of observation this note represents. Used to triage at a glance —
+/// bugs first, polish second, questions third, info last.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    Bug,
+    Polish,
+    Question,
+    Info,
+}
+
+impl Kind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Kind::Bug => "bug",
+            Kind::Polish => "polish",
+            Kind::Question => "question",
+            Kind::Info => "info",
+        }
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            Kind::Bug => "Bug",
+            Kind::Polish => "Polish",
+            Kind::Question => "Question",
+            Kind::Info => "Info",
+        }
+    }
+
+    pub fn emoji(&self) -> &'static str {
+        match self {
+            Kind::Bug => "🐛",
+            Kind::Polish => "✏️",
+            Kind::Question => "❓",
+            Kind::Info => "ℹ️",
+        }
+    }
+
+    pub fn parse(s: &str) -> anyhow::Result<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "bug" | "broken" | "regression" | "issue" => Ok(Kind::Bug),
+            "polish" | "nit" | "minor" | "cosmetic" => Ok(Kind::Polish),
+            "question" | "q" | "unsure" | "ask" => Ok(Kind::Question),
+            "info" | "fyi" | "note" | "context" => Ok(Kind::Info),
+            other => Err(anyhow::anyhow!(
+                "invalid kind '{}' — use bug, polish, question, or info",
+                other
+            )),
+        }
+    }
+
+    /// Lower number = higher triage priority (rendered first).
+    pub fn sort_priority(&self) -> u8 {
+        match self {
+            Kind::Bug => 0,
+            Kind::Polish => 1,
+            Kind::Question => 2,
+            Kind::Info => 3,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct RunMeta {
     pub description: Option<String>,
@@ -172,6 +234,7 @@ pub struct RunNote {
     pub id: i64,
     pub run_id: i64,
     pub scope: Scope,
+    pub kind: Kind,
     pub text: String,
     pub reported_at: String,
 }
@@ -291,6 +354,27 @@ mod tests {
         assert_eq!(Scope::parse("out").unwrap(), Scope::Out);
         assert_eq!(Scope::parse("out-of-scope").unwrap(), Scope::Out);
         assert!(Scope::parse("sideways").is_err());
+    }
+
+    #[test]
+    fn kind_parse_accepts_aliases() {
+        assert_eq!(Kind::parse("bug").unwrap(), Kind::Bug);
+        assert_eq!(Kind::parse("BUG").unwrap(), Kind::Bug);
+        assert_eq!(Kind::parse("regression").unwrap(), Kind::Bug);
+        assert_eq!(Kind::parse("polish").unwrap(), Kind::Polish);
+        assert_eq!(Kind::parse("nit").unwrap(), Kind::Polish);
+        assert_eq!(Kind::parse("question").unwrap(), Kind::Question);
+        assert_eq!(Kind::parse("q").unwrap(), Kind::Question);
+        assert_eq!(Kind::parse("info").unwrap(), Kind::Info);
+        assert_eq!(Kind::parse("FYI").unwrap(), Kind::Info);
+        assert!(Kind::parse("whatever").is_err());
+    }
+
+    #[test]
+    fn kind_sort_priority_orders_correctly() {
+        let mut kinds = [Kind::Info, Kind::Bug, Kind::Question, Kind::Polish];
+        kinds.sort_by_key(Kind::sort_priority);
+        assert_eq!(kinds, [Kind::Bug, Kind::Polish, Kind::Question, Kind::Info]);
     }
 
     #[test]

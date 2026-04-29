@@ -39,8 +39,13 @@
         {% if r.counts.skipped > 0 %}<span class="pill pill-skipped">{{ r.counts.skipped }}S</span>{% endif %}
       </td>
       <td>
-        {% if r.findings > 0 %}
-          <a href="/runs/{{ r.run.id }}#findings" class="pill pill-findings" title="Click to review">📋 {{ r.findings }}</a>
+        {% if r.kind_counts.total() > 0 %}
+          <a href="/runs/{{ r.run.id }}#findings" class="kind-counts">
+            {% if r.kind_counts.bug      > 0 %}<span class="pill pill-kind-bug">🐛 {{ r.kind_counts.bug }}</span>{% endif %}
+            {% if r.kind_counts.polish   > 0 %}<span class="pill pill-kind-polish">✏️ {{ r.kind_counts.polish }}</span>{% endif %}
+            {% if r.kind_counts.question > 0 %}<span class="pill pill-kind-question">❓ {{ r.kind_counts.question }}</span>{% endif %}
+            {% if r.kind_counts.info     > 0 %}<span class="pill pill-kind-info">ℹ️ {{ r.kind_counts.info }}</span>{% endif %}
+          </a>
         {% else %}
           <span class="muted">·</span>
         {% endif %}
