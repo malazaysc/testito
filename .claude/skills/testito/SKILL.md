@@ -88,10 +88,14 @@ testito start --run "<name>" [--description "..."] [METADATA…]
     Optional. Auto-created on first `report` if you skip this.
 
 testito report --run "<name>" --test "<scenario>" --step "<action>"
-              --result <pass|fail|warning|skipped> [--attempt N] [--note "..."] [METADATA…]
+              --result <pass|fail|warning|skipped> [--attempt N] [--note "..."]
+              [--screenshot PATH ...] [METADATA…]
     The main verb. Call this once per step as you go.
+    --screenshot is repeatable; each file is copied into testito's storage
+    and rendered as an inline thumbnail under the step's note.
 
 testito jot --run "<name>" --text "..." --kind <bug|polish|question|info>
+            [--screenshot PATH ...]
     *** Use this freely. *** One-line, low-friction filing of an out-of-scope
     observation. Markdown is rendered in the dashboard. There is no downside
     to jotting too much; there is real downside to jotting too little.
@@ -99,6 +103,7 @@ testito jot --run "<name>" --text "..." --kind <bug|polish|question|info>
     triage by it.
 
 testito note --run "<name>" --scope <in|out> --kind <...> --text "..."
+             [--screenshot PATH ...]
     Same idea but explicit about scope. Use scope=in for findings within the
     testing brief that don't fit the step grain (e.g. "login is unusually
     slow on first load"). Use scope=out (or just `jot`) for tangential
@@ -165,14 +170,17 @@ The dashboard has a `💬 Add feedback` box on each finding and on each test hea
    - `warning` — it worked but with a caveat (slow, ugly, partially right). Pair with `--note`.
    - `skipped` — couldn't run (preconditions missing, blocked by an earlier failure). Pair with `--note` saying why.
 4. **Jot tangential findings as you see them, not at the end.** `testito jot --run "<name>" --text "..."`. Don't batch — each observation goes in immediately so you don't forget.
-5. **Notes are markdown.** Code fences for tracebacks, backticks for paths/commands, links for URLs. Multi-line notes are fine — quote the whole thing in a single shell argument:
+5. **Attach screenshots when they help.** When you're testing in a browser via playwright-cli (or any tool that drops PNGs on disk), pass `--screenshot PATH` on `report`, `jot`, or `note`. The CLI accepts the flag repeatedly so you can attach multiple. Strong cases: any UI bug, any layout/polish observation, any "the page looked weird" warning. The file is copied into testito's storage (you don't need to keep the original around) and the dashboard shows it as a clickable thumbnail under the finding. Example: `testito jot --run X --kind bug --text "Dashboard 500s" --screenshot /tmp/playwright-cli/page-2026-04-29.png`.
+
+6. **Notes are markdown.** Code fences for tracebacks, backticks for paths/commands, links for URLs. Multi-line notes are fine — quote the whole thing in a single shell argument:
    ```
    --note $'```\nUncaught TypeError: Cannot read properties of undefined\n  at handleSubmit (login.ts:42)\n```'
    ```
-6. **If you retry a step**, log the second attempt with `--attempt 2` (and so on). Don't overwrite — re-call `report` with the same `--test` and `--step` and a higher `--attempt`.
-7. **Walk the checklist** above before `end`. Jot anything left.
-8. **End the run.** `testito end --run "<name>"`.
-9. Tell the user the run name and (if `testito serve` is running) the dashboard URL: `http://127.0.0.1:7878/runs/<id>`. Mention the count of jotted findings (`testito show` will summarize).
+7. **If you retry a step**, log the second attempt with `--attempt 2` (and so on). Don't overwrite — re-call `report` with the same `--test` and `--step` and a higher `--attempt`.
+8. **Watch stderr after every report** for the `👤 N unseen feedback items` nag. The user might have responded to a finding or left an instruction on a test — read it via `testito feedback --run X --unseen` before continuing.
+9. **Walk the checklist** above before `end`. Jot anything left.
+10. **End the run.** `testito end --run "<name>"`.
+11. Tell the user the run name and (if `testito serve` is running) the dashboard URL: `http://127.0.0.1:7878/runs/<id>`. Mention the count of jotted findings (`testito show` will summarize) and any screenshots you attached.
 
 ## Result-vocabulary discipline
 
@@ -204,8 +212,10 @@ testito report --run "$RUN" \
   --step "navigate to /login" --result pass
 
 # I noticed something tangential while loading the page — file it now, don't wait
+# (and attach the screenshot I just took so the human can see it without repro)
 testito jot --run "$RUN" --kind polish \
-  --text "Login page logo is slightly blurry on retina; suspect missing 2x asset."
+  --text "Login page logo is slightly blurry on retina; suspect missing 2x asset." \
+  --screenshot /tmp/playwright-cli/page-2026-04-29-login-logo.png
 
 testito report --run "$RUN" \
   --test "login with valid credentials" \
@@ -224,7 +234,10 @@ testito report --run "$RUN" \
 testito report --run "$RUN" \
   --test "password reset email arrives" \
   --step "reset email arrives within 30s" --result fail \
-  --note $'Waited 90s, no email.\n\n```\nWorker log: redis: connection refused (172.18.0.4:6379)\n```'
+  --note $'Waited 90s, no email.\n\n```\nWorker log: redis: connection refused (172.18.0.4:6379)\n```' \
+  --screenshot /tmp/playwright-cli/reset-form-still-loading.png
+# (after this report, stderr might say "👤 1 unseen feedback item on this run".
+#  if it does, run `testito feedback --run "$RUN" --unseen` to read what the user said.)
 
 testito report --run "$RUN" \
   --test "password reset email arrives" \
