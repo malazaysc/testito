@@ -16,8 +16,8 @@ mod storage;
 
 use db::Db;
 use models::{
-    relative_time, rollup, AttachmentTarget, FeedbackTarget, Kind, Result as TestResult, RunMeta,
-    RunStep, Scope,
+    relative_time, rollup, AttachmentTarget, FeedbackTarget, Kind, Result as TestResult,
+    ReviewKind, ReviewVerdict, RunMeta, RunStep, Scope,
 };
 
 #[derive(Parser, Debug)]
@@ -66,6 +66,13 @@ enum Cmd {
     /// one call. Marks feedback as seen by default — pass `--no-mark-seen`
     /// to peek. Pair with `--json` for an agent to parse.
     Triage(TriageArgs),
+
+    /// File a one-shot assessment of a run/PR (security review, code review,
+    /// perf review). Append-only — re-running a review files a new row so
+    /// the dashboard shows the assessment history. Use this from
+    /// `/security-review`-style agents instead of dumping the verdict into
+    /// chat.
+    Review(ReviewArgs),
 }
 
 #[derive(Args, Debug, Default)]
@@ -90,13 +97,23 @@ struct MetaArgs {
     /// Auto-detected when omitted; pass to override.
     #[arg(long)]
     workdir: Option<String>,
+
+    /// GitHub PR number this run is associated with. Auto-detected via
+    /// `gh pr view` when omitted; pass to override or attach manually.
+    #[arg(long)]
+    pr: Option<i64>,
+
+    /// PR HTML URL. Auto-detected via `gh pr view` alongside `--pr`. Pass
+    /// to override (e.g. for non-GitHub PRs).
+    #[arg(long = "pr-url")]
+    pr_url: Option<String>,
 }
 
 impl MetaArgs {
-    /// Build a `RunMeta`, filling in unset `branch`/`commit`/`workdir` from
-    /// the current shell + git working tree. Explicit flags always win;
-    /// auto-detection is best-effort and silently no-ops if `git` isn't
-    /// available or we're not inside a repo.
+    /// Build a `RunMeta`, filling in unset `branch`/`commit`/`workdir`/`pr`
+    /// from the current shell + git working tree + `gh pr view`. Explicit
+    /// flags always win; auto-detection is best-effort and silently no-ops
+    /// if the tools aren't available or we're not inside a repo.
     fn into_meta(mut self, description: Option<String>) -> RunMeta {
         let auto = auto::detect();
         if self.branch.is_none() {
@@ -108,6 +125,12 @@ impl MetaArgs {
         if self.workdir.is_none() {
             self.workdir = auto.workdir;
         }
+        if self.pr.is_none() {
+            self.pr = auto.pr_number;
+        }
+        if self.pr_url.is_none() {
+            self.pr_url = auto.pr_url;
+        }
         RunMeta {
             description,
             branch: self.branch,
@@ -115,6 +138,8 @@ impl MetaArgs {
             env: self.env,
             url: self.url,
             workdir: self.workdir,
+            pr_number: self.pr,
+            pr_url: self.pr_url,
         }
     }
 }
@@ -302,6 +327,36 @@ struct FeedbackArgs {
 }
 
 #[derive(Args, Debug)]
+struct ReviewArgs {
+    /// Run name (auto-creates the run if it doesn't exist, picking up
+    /// branch/commit/PR from auto-detect — same as `report`).
+    #[arg(long)]
+    run: String,
+
+    /// Kind of review: security | code | perf | other. Default: security.
+    #[arg(long, default_value = "security")]
+    kind: String,
+
+    /// Verdict: clean | advisory | blocking. Drives the dashboard banner
+    /// color (green / yellow / red).
+    #[arg(long)]
+    verdict: String,
+
+    /// The review body. Markdown is rendered in the dashboard. Lead with
+    /// the verdict in plain language ("No vulnerabilities found.")
+    /// followed by the rationale — the first line shows up first.
+    #[arg(long)]
+    text: String,
+
+    #[command(flatten)]
+    meta: MetaArgs,
+
+    /// SQLite database file (default: platform data dir).
+    #[arg(long)]
+    db: Option<PathBuf>,
+}
+
+#[derive(Args, Debug)]
 struct TriageArgs {
     /// Run name.
     #[arg(long)]
@@ -401,6 +456,10 @@ async fn main() -> Result<()> {
         Cmd::Triage(a) => {
             let db_path = resolve_db(a.db.clone())?;
             cmd_triage(db_path, a)
+        }
+        Cmd::Review(a) => {
+            let db_path = resolve_db(a.db.clone())?;
+            cmd_review(db_path, a)
         }
     }
 }
@@ -765,6 +824,8 @@ fn cmd_list(db_path: PathBuf, a: ListArgs) -> Result<()> {
                     "env": r.env,
                     "url": r.url,
                     "workdir": r.workdir,
+                    "pr_number": r.pr_number,
+                    "pr_url": r.pr_url,
                     "started_at": r.started_at,
                     "completed_at": r.completed_at,
                     "tests": r.test_count,
@@ -871,6 +932,10 @@ fn cmd_triage(db_path: PathBuf, a: TriageArgs) -> Result<()> {
         db.mark_run_feedback_seen(run_id)?;
     }
 
+    // Reviews — surface every signed assessment, regardless of --all. There's
+    // typically only a handful per run and they're high signal.
+    let reviews = db.reviews_for_run(run_id)?;
+
     // step_id → [note_id] from the step_finding_refs table (one fetch).
     let mut refs_by_step: std::collections::HashMap<i64, Vec<i64>> =
         std::collections::HashMap::new();
@@ -899,6 +964,15 @@ fn cmd_triage(db_path: PathBuf, a: TriageArgs) -> Result<()> {
             "env": run.env,
             "url": run.url,
             "workdir": run.workdir,
+            "pr_number": run.pr_number,
+            "pr_url": run.pr_url,
+            "reviews": reviews.iter().map(|r| serde_json::json!({
+                "id": r.id,
+                "kind": r.kind.as_str(),
+                "verdict": r.verdict.as_str(),
+                "text": r.text,
+                "created_at": r.created_at,
+            })).collect::<Vec<_>>(),
             "tests_with_issues": hot_tests.iter().map(|(name, steps)| serde_json::json!({
                 "test": name,
                 "steps": steps.iter().map(|s| {
@@ -950,27 +1024,36 @@ fn cmd_triage(db_path: PathBuf, a: TriageArgs) -> Result<()> {
             .map(|r| format!("  [{}]", r.label()))
             .unwrap_or_default()
     );
-    if !run.branch.is_empty() || !run.commit_sha.is_empty() {
-        println!(
-            "  {}{}{}",
-            if run.branch.is_empty() {
-                String::new()
-            } else {
-                format!("branch: {}", run.branch)
-            },
-            if !run.branch.is_empty() && !run.commit_sha.is_empty() {
-                " · "
-            } else {
-                ""
-            },
-            if run.commit_sha.is_empty() {
-                String::new()
-            } else {
-                format!("commit: {}", run.commit_sha)
-            },
-        );
+    if !run.branch.is_empty() || !run.commit_sha.is_empty() || run.pr_number.is_some() {
+        let mut bits = Vec::new();
+        if !run.branch.is_empty() {
+            bits.push(format!("branch: {}", run.branch));
+        }
+        if !run.commit_sha.is_empty() {
+            bits.push(format!("commit: {}", run.commit_sha));
+        }
+        if let Some(n) = run.pr_number {
+            bits.push(format!("PR: #{}", n));
+        }
+        println!("  {}", bits.join(" · "));
     }
     println!();
+
+    if !reviews.is_empty() {
+        println!("Reviews ({}):", reviews.len());
+        for r in &reviews {
+            println!(
+                "  {} {} — {}",
+                r.kind.emoji(),
+                r.kind.label(),
+                r.verdict.label(),
+            );
+            for line in r.text.lines() {
+                println!("    {}", line);
+            }
+        }
+        println!();
+    }
 
     if hot_tests.is_empty() {
         println!("Tests with issues: ✓ none");
@@ -1064,6 +1147,26 @@ fn cmd_triage(db_path: PathBuf, a: TriageArgs) -> Result<()> {
     Ok(())
 }
 
+fn cmd_review(db_path: PathBuf, a: ReviewArgs) -> Result<()> {
+    let kind = ReviewKind::parse(&a.kind)?;
+    let verdict = ReviewVerdict::parse(&a.verdict)?;
+    let db = Db::open(&db_path)?;
+    // Same auto-create-on-write semantics as `report`/`note`/`jot` — the
+    // run gets branch/commit/PR auto-filled if it didn't exist yet.
+    let meta = a.meta.into_meta(None);
+    let run_id = db.ensure_run(&a.run, &meta)?;
+    let id = db.insert_review(run_id, kind, verdict, &a.text)?;
+    println!(
+        "review #{} on {} ({} {} · {})",
+        id,
+        a.run,
+        kind.emoji(),
+        kind.label(),
+        verdict.label(),
+    );
+    Ok(())
+}
+
 fn cmd_show(db_path: PathBuf, a: ShowArgs) -> Result<()> {
     let db = Db::open(&db_path)?;
     let run_id = db
@@ -1103,6 +1206,8 @@ fn cmd_show(db_path: PathBuf, a: ShowArgs) -> Result<()> {
             "env": run.env,
             "url": run.url,
             "workdir": run.workdir,
+            "pr_number": run.pr_number,
+            "pr_url": run.pr_url,
             "started_at": run.started_at,
             "completed_at": run.completed_at,
             "rollup": run_rollup.map(|r| r.as_str()),
@@ -1143,9 +1248,11 @@ fn cmd_show(db_path: PathBuf, a: ShowArgs) -> Result<()> {
     if !run.description.is_empty() {
         println!("{}", run.description);
     }
+    let pr_str = run.pr_number.map(|n| format!("#{n}")).unwrap_or_default();
     let meta_lines: Vec<(&str, &str)> = [
         ("Branch", run.branch.as_str()),
         ("Commit", run.commit_sha.as_str()),
+        ("PR", pr_str.as_str()),
         ("Env", run.env.as_str()),
         ("URL", run.url.as_str()),
         ("Workdir", run.workdir.as_str()),

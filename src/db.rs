@@ -4,21 +4,21 @@ use anyhow::Result;
 use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::models::{
-    Attachment, AttachmentTarget, Feedback, FeedbackTarget, Kind, Result as TestResult, Run,
-    RunMeta, RunNote, RunStep, RunTest, Scope,
+    Attachment, AttachmentTarget, Feedback, FeedbackTarget, Kind, Result as TestResult, Review,
+    ReviewKind, ReviewVerdict, Run, RunMeta, RunNote, RunStep, RunTest, Scope,
 };
 
 pub struct Db {
     pub conn: Connection,
 }
 
-const SELECT_RUN_BASE_NO_ORDER: &str = "SELECT r.id, r.name, r.description, r.branch, r.commit_sha, r.env, r.url, r.workdir, r.started_at, r.completed_at,
+const SELECT_RUN_BASE_NO_ORDER: &str = "SELECT r.id, r.name, r.description, r.branch, r.commit_sha, r.env, r.url, r.workdir, r.pr_number, r.pr_url, r.started_at, r.completed_at,
                     (SELECT COUNT(*) FROM run_tests WHERE run_id = r.id) as test_count,
                     (SELECT COUNT(*) FROM run_steps s JOIN run_tests t ON s.run_test_id = t.id WHERE t.run_id = r.id) as step_count,
                     (SELECT COUNT(*) FROM run_notes WHERE run_id = r.id) as note_count
              FROM runs r";
 
-const SELECT_RUN_BASE: &str = "SELECT r.id, r.name, r.description, r.branch, r.commit_sha, r.env, r.url, r.workdir, r.started_at, r.completed_at,
+const SELECT_RUN_BASE: &str = "SELECT r.id, r.name, r.description, r.branch, r.commit_sha, r.env, r.url, r.workdir, r.pr_number, r.pr_url, r.started_at, r.completed_at,
                     (SELECT COUNT(*) FROM run_tests WHERE run_id = r.id) as test_count,
                     (SELECT COUNT(*) FROM run_steps s JOIN run_tests t ON s.run_test_id = t.id WHERE t.run_id = r.id) as step_count,
                     (SELECT COUNT(*) FROM run_notes WHERE run_id = r.id) as note_count
@@ -34,11 +34,13 @@ fn map_run(r: &rusqlite::Row) -> rusqlite::Result<Run> {
         env: r.get(5)?,
         url: r.get(6)?,
         workdir: r.get(7)?,
-        started_at: r.get(8)?,
-        completed_at: r.get(9)?,
-        test_count: r.get(10)?,
-        step_count: r.get(11)?,
-        note_count: r.get(12)?,
+        pr_number: r.get(8)?,
+        pr_url: r.get(9)?,
+        started_at: r.get(10)?,
+        completed_at: r.get(11)?,
+        test_count: r.get(12)?,
+        step_count: r.get(13)?,
+        note_count: r.get(14)?,
     })
 }
 
@@ -52,6 +54,8 @@ CREATE TABLE IF NOT EXISTS runs (
     env TEXT NOT NULL DEFAULT '',
     url TEXT NOT NULL DEFAULT '',
     workdir TEXT NOT NULL DEFAULT '',
+    pr_number INTEGER,
+    pr_url TEXT NOT NULL DEFAULT '',
     started_at TEXT NOT NULL,
     completed_at TEXT
 );
@@ -123,6 +127,17 @@ CREATE TABLE IF NOT EXISTS step_finding_refs (
 
 CREATE INDEX IF NOT EXISTS idx_step_finding_refs_step ON step_finding_refs(step_id);
 CREATE INDEX IF NOT EXISTS idx_step_finding_refs_note ON step_finding_refs(note_id);
+
+CREATE TABLE IF NOT EXISTS reviews (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id INTEGER NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL,        -- 'security' | 'code' | 'perf' | 'other'
+    verdict TEXT NOT NULL,     -- 'clean' | 'advisory' | 'blocking'
+    text TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_reviews_run ON reviews(run_id);
 "#;
 
 const DROP_LEGACY: &str = r#"
@@ -152,7 +167,7 @@ impl Db {
         // Migrate older runs tables that lack metadata columns. ADD COLUMN is
         // a no-op semantically when the column already exists, but sqlite errors,
         // so we check first.
-        for col in ["branch", "commit_sha", "env", "url", "workdir"] {
+        for col in ["branch", "commit_sha", "env", "url", "workdir", "pr_url"] {
             if !column_exists(&conn, "runs", col)? {
                 conn.execute(
                     &format!(
@@ -162,6 +177,11 @@ impl Db {
                     [],
                 )?;
             }
+        }
+        // pr_number is nullable INTEGER (a PR number doesn't have a sensible
+        // empty value, unlike a string field).
+        if !column_exists(&conn, "runs", "pr_number")? {
+            conn.execute("ALTER TABLE runs ADD COLUMN pr_number INTEGER", [])?;
         }
         // Migrate existing run_notes tables to add the kind column (default 'info'
         // so legacy notes show up as informational rather than triaged).
@@ -181,8 +201,8 @@ impl Db {
         }
         let now = chrono::Utc::now().to_rfc3339();
         self.conn.execute(
-            "INSERT INTO runs(name, description, branch, commit_sha, env, url, workdir, started_at)
-             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT INTO runs(name, description, branch, commit_sha, env, url, workdir, pr_number, pr_url, started_at)
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 name,
                 meta.description.as_deref().unwrap_or(""),
@@ -191,6 +211,8 @@ impl Db {
                 meta.env.as_deref().unwrap_or(""),
                 meta.url.as_deref().unwrap_or(""),
                 meta.workdir.as_deref().unwrap_or(""),
+                meta.pr_number,
+                meta.pr_url.as_deref().unwrap_or(""),
                 now,
             ],
         )?;
@@ -208,6 +230,7 @@ impl Db {
             ("env", meta.env.as_ref()),
             ("url", meta.url.as_ref()),
             ("workdir", meta.workdir.as_ref()),
+            ("pr_url", meta.pr_url.as_ref()),
         ];
         for (col, val) in pairs {
             if let Some(v) = val {
@@ -216,6 +239,12 @@ impl Db {
                     self.conn.execute(&sql, params![v, id])?;
                 }
             }
+        }
+        if let Some(n) = meta.pr_number {
+            self.conn.execute(
+                "UPDATE runs SET pr_number = ?1 WHERE id = ?2",
+                params![n, id],
+            )?;
         }
         Ok(())
     }
@@ -446,6 +475,56 @@ impl Db {
         )?;
         let rows = stmt.query_map(params![run_id], |r| {
             Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Append a review (security/code/perf/other) to a run. Reviews are
+    /// append-only just like steps and notes — re-running `/security-review`
+    /// against a run files a new review row rather than mutating the prior
+    /// one, so the dashboard shows the assessment history.
+    pub fn insert_review(
+        &self,
+        run_id: i64,
+        kind: ReviewKind,
+        verdict: ReviewVerdict,
+        text: &str,
+    ) -> Result<i64> {
+        let now = chrono::Utc::now().to_rfc3339();
+        self.conn.execute(
+            "INSERT INTO reviews(run_id, kind, verdict, text, created_at)
+             VALUES(?1, ?2, ?3, ?4, ?5)",
+            params![run_id, kind.as_str(), verdict.as_str(), text, now],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    pub fn reviews_for_run(&self, run_id: i64) -> Result<Vec<Review>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, run_id, kind, verdict, text, created_at
+             FROM reviews
+             WHERE run_id = ?1
+             ORDER BY created_at DESC, id DESC",
+        )?;
+        let rows = stmt.query_map(params![run_id], |r| {
+            Ok(Review {
+                id: r.get(0)?,
+                run_id: r.get(1)?,
+                kind: match r.get::<_, String>(2)?.as_str() {
+                    "security" => ReviewKind::Security,
+                    "code" => ReviewKind::Code,
+                    "perf" => ReviewKind::Perf,
+                    _ => ReviewKind::Other,
+                },
+                verdict: match r.get::<_, String>(3)?.as_str() {
+                    "clean" => ReviewVerdict::Clean,
+                    "advisory" => ReviewVerdict::Advisory,
+                    "blocking" => ReviewVerdict::Blocking,
+                    _ => ReviewVerdict::Advisory,
+                },
+                text: r.get(4)?,
+                created_at: r.get(5)?,
+            })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }

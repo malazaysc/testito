@@ -116,6 +116,19 @@ testito end --run "<name>" [--fail-if-failures]
 testito list   [--limit N] [--json]
 testito show   --run NAME [--json]
 testito feedback --run NAME [--unseen] [--no-mark-seen] [--json]
+
+testito review --run "<name>" --kind <security|code|perf|other>
+              --verdict <clean|advisory|blocking|approve|approve-with-suggestions|request-changes>
+              --text "..."
+    File a one-shot assessment (security review, code review, perf review)
+    on a run. Use this from `/security-review` / `/review` agents instead
+    of dumping the verdict in chat.
+
+testito triage --run "<name>" [--json] [--no-mark-seen] [--all]
+    Actionable subset of a run for the coding agent: failed/warning steps,
+    bug/polish notes, all feedback, all reviews. Bidirectional links
+    (`finding_refs` per step; `feedback_ids` + `cited_by_step_ids` per
+    finding). Use as the entry point when picking up a finished run.
     Read the human's feedback on this run from the dashboard. The user can
     type responses on individual findings or tests in the UI; this command
     is how you pick up answers, follow-up instructions, or "ignore this and
@@ -137,6 +150,8 @@ shows them in a banner so a reviewer knows *what* was tested.
 --env     <label>      e.g. local, staging, prod
 --url     <origin>     e.g. http://localhost:3000
 --workdir <label>      linked-worktree dir + zellij session  (auto-detected)
+--pr      <number>     GitHub PR number                  (auto: `gh pr view`)
+--pr-url  <url>        PR HTML URL                       (auto-detected with --pr)
 ```
 
 `--branch`, `--commit`, and `--workdir` are filled in automatically from the
@@ -188,6 +203,45 @@ testito report --run "$RUN" --test "i18n" --step "Switch locale to Español" \
 `testito triage --json` then emits `tests_with_issues[].steps[].finding_refs: [33, 34]` and `findings[].cited_by_step_ids: [<step_id>]`, and trims the step note to its first line. Without anchors, the step's full note text is the only carrier of context, so triage keeps it intact — but the result is fatter. Anchor whenever you can.
 
 The id you pass is the one returned by `testito jot` (printed as `jotted #33 …`) or visible in the dashboard / `testito triage --json`.
+
+## File security and code reviews to testito, not chat
+
+When you run a `/security-review`, `/review`, or any other "audit the diff"
+pass — **do not dump the verdict into the chat**. File it as a `testito
+review` so the human sees it on the dashboard alongside the QA run, gets it
+in the PR-summary blob, and can leave feedback on it.
+
+```bash
+# Security review — typically clean or advisory
+testito review --run "$RUN" --kind security --verdict clean --text "$(cat <<'EOF'
+No vulnerabilities found.
+
+The diff is purely client-side state-management plumbing — no auth/session
+paths, no new endpoints, no SSR HTML interpolation, no filesystem/process/eval
+sinks.
+EOF
+)"
+
+# Code review — use the GitHub-style verdict aliases the agent already thinks in
+testito review --run "$RUN" --kind code --verdict approve --text "..."
+testito review --run "$RUN" --kind code --verdict approve-with-suggestions --text "..."
+testito review --run "$RUN" --kind code --verdict request-changes --text "..."
+```
+
+**Kind picks the icon and label**: `security` (🛡️), `code` (🔍), `perf` (⚡),
+`other` (📝). **Verdict picks the banner color**: `clean` → green, `advisory` →
+yellow, `blocking` → red. Aliases: `approve` = `clean`,
+`approve-with-suggestions` = `advisory`, `request-changes` = `blocking`.
+
+Lead the `--text` with the verdict in plain language (the dashboard renders
+the first line first). Markdown is fully supported — headings, bullets, code
+fences, links. The reviewing agent doesn't have to know the run name in
+advance: pick a stable name like `pr-340-review` and `testito review`
+auto-creates the run, picking up branch/commit/PR via `gh pr view`.
+
+Reviews are append-only: a follow-up `/security-review` after a code change
+files a new review row instead of mutating the previous one, so the
+assessment history is on the dashboard.
 
 ## Picking up an existing run (act-on-findings mode)
 

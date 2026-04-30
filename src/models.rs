@@ -145,6 +145,8 @@ pub struct RunMeta {
     pub env: Option<String>,
     pub url: Option<String>,
     pub workdir: Option<String>,
+    pub pr_number: Option<i64>,
+    pub pr_url: Option<String>,
 }
 
 impl RunMeta {
@@ -155,6 +157,8 @@ impl RunMeta {
             && self.env.is_none()
             && self.url.is_none()
             && self.workdir.is_none()
+            && self.pr_number.is_none()
+            && self.pr_url.is_none()
     }
 }
 
@@ -168,6 +172,8 @@ pub struct Run {
     pub env: String,
     pub url: String,
     pub workdir: String,
+    pub pr_number: Option<i64>,
+    pub pr_url: String,
     pub started_at: String,
     pub completed_at: Option<String>,
     pub test_count: i64,
@@ -182,6 +188,14 @@ impl Run {
             || !self.env.is_empty()
             || !self.url.is_empty()
             || !self.workdir.is_empty()
+            || self.pr_number.is_some()
+    }
+
+    /// True only when `self.pr_url` is safe to render as a clickable
+    /// `<a href>`. PR URLs come from `gh pr view`, but we still gate on
+    /// http(s) for defense in depth.
+    pub fn pr_url_is_safe(&self) -> bool {
+        is_http_url(&self.pr_url)
     }
 
     /// True only when `self.url` is safe to render as a clickable `<a href>`.
@@ -303,6 +317,110 @@ pub struct Attachment {
     pub original_filename: String,
     pub mime_type: String,
     pub bytes: i64,
+    pub created_at: String,
+}
+
+/// Top-level assessment attached to a run. Distinct from `RunNote`: a review
+/// is one signed pass over the run/PR (security review, code review, perf
+/// review, …) with a single overall verdict, not a finding among many.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReviewKind {
+    Security,
+    Code,
+    Perf,
+    Other,
+}
+
+impl ReviewKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Security => "security",
+            Self::Code => "code",
+            Self::Perf => "perf",
+            Self::Other => "other",
+        }
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Security => "Security review",
+            Self::Code => "Code review",
+            Self::Perf => "Perf review",
+            Self::Other => "Review",
+        }
+    }
+
+    pub fn emoji(&self) -> &'static str {
+        match self {
+            Self::Security => "🛡️",
+            Self::Code => "🔍",
+            Self::Perf => "⚡",
+            Self::Other => "📝",
+        }
+    }
+
+    pub fn parse(s: &str) -> anyhow::Result<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "security" | "sec" => Ok(Self::Security),
+            "code" | "review" => Ok(Self::Code),
+            "perf" | "performance" => Ok(Self::Perf),
+            "other" | "misc" => Ok(Self::Other),
+            other => Err(anyhow::anyhow!(
+                "unknown review kind '{other}' (expected: security, code, perf, other)"
+            )),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReviewVerdict {
+    Clean,
+    Advisory,
+    Blocking,
+}
+
+impl ReviewVerdict {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Clean => "clean",
+            Self::Advisory => "advisory",
+            Self::Blocking => "blocking",
+        }
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Clean => "Clean",
+            Self::Advisory => "Advisory",
+            Self::Blocking => "Blocking",
+        }
+    }
+
+    pub fn parse(s: &str) -> anyhow::Result<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            // Generic.
+            "clean" | "pass" | "ok" => Ok(Self::Clean),
+            "advisory" | "warn" | "warning" => Ok(Self::Advisory),
+            "blocking" | "block" | "fail" => Ok(Self::Blocking),
+            // Code-review aliases — let the agent write what it means.
+            "approve" | "approved" => Ok(Self::Clean),
+            "approve-with-suggestions" | "comment" => Ok(Self::Advisory),
+            "request-changes" | "request_changes" | "changes-requested" => Ok(Self::Blocking),
+            other => Err(anyhow::anyhow!(
+                "unknown review verdict '{other}' (expected: clean, advisory, blocking; \
+                 also: approve, approve-with-suggestions, request-changes)"
+            )),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Review {
+    pub id: i64,
+    pub run_id: i64,
+    pub kind: ReviewKind,
+    pub verdict: ReviewVerdict,
+    pub text: String,
     pub created_at: String,
 }
 
@@ -544,6 +662,8 @@ mod tests {
             env: String::new(),
             url: url.to_string(),
             workdir: String::new(),
+            pr_number: None,
+            pr_url: String::new(),
             started_at: String::new(),
             completed_at: None,
             test_count: 0,

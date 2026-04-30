@@ -32,7 +32,9 @@ Both paths fan in to `build_run_body()` in `src/routes.rs`, which fetches everyt
 
 **The PR-summary block is special.** It renders the same markdown twice: as HTML for reading, and via the `data-copy-text` attribute on the copy button so "📋 copy markdown" copies the raw markdown source for pasting into a PR.
 
-**Run metadata auto-detect.** `src/auto.rs` shells out to `git rev-parse` for branch + short SHA, detects linked worktrees by comparing `--git-common-dir` to `--git-dir`, and reads `ZELLIJ_SESSION_NAME` from the env. `MetaArgs::into_meta()` fills any unset metadata field from this in `start`/`report`. Detection is best-effort — silent no-op if `git` is missing or we're outside a repo. Explicit flags always win.
+**Run metadata auto-detect.** `src/auto.rs` shells out to `git rev-parse` for branch + short SHA, detects linked worktrees by comparing `--git-common-dir` to `--git-dir`, reads `ZELLIJ_SESSION_NAME` from the env, and runs `gh pr view --json number,url` for the PR number/URL. `MetaArgs::into_meta()` fills any unset metadata field from this in `start`/`report`/`review`/`note`/`jot`. Detection is best-effort — silent no-op if a tool is missing or we're outside a repo. Explicit flags always win.
+
+**Reviews.** `Cmd::Review` files a one-shot assessment (security/code/perf/other × clean/advisory/blocking) on a run via the `reviews` table. Append-only, like steps and notes. Renders as a banner above Findings color-coded by verdict; flows into the PR-summary blob, markdown export, and triage JSON. `ReviewVerdict::parse()` accepts GitHub-style aliases (`approve`, `approve-with-suggestions`, `request-changes`) so review agents can write what they mean.
 
 **Schema migrations are idempotent.** `Db::open()` creates tables and runs ALTERs guarded by `column_exists()` / `has_legacy_table()` checks — there's no migration table. Both the CLI and `serve` run them on startup, so any schema change must be safe to apply concurrently and to re-apply.
 

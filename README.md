@@ -110,7 +110,12 @@ testito list   [--limit N] [--json]
 testito show   --run NAME [--json]
 testito triage --run NAME [--json] [--no-mark-seen] [--all]
 testito feedback --run NAME [--unseen] [--no-mark-seen] [--json]
+testito review --run NAME --kind <security|code|perf|other>
+                          --verdict <clean|advisory|blocking|approve|approve-with-suggestions|request-changes>
+                          --text "..."
 ```
+
+`review` files a one-shot assessment (security review, code review, perf review) on a run. Append-only, so re-running `/security-review` after a fix files a new review row. Renders as a color-coded banner above Findings on the dashboard (green clean / yellow advisory / red blocking) and gets included in the PR-summary blob and markdown export.
 
 `--fail-if-failures` makes `end` exit `1` when the run's rollup is `fail`. Wire it into CI: agent reports → `testito end --run "$RUN" --fail-if-failures` is the gate.
 
@@ -123,8 +128,10 @@ testito feedback --run NAME [--unseen] [--no-mark-seen] [--json]
 `[METADATA…]` (accepted by `start` and `report`):
 
 ```
---branch  <name>      e.g. main, feature/checkout
---commit  <sha>       e.g. abc1234
+--branch  <name>      e.g. main, feature/checkout       (auto: git rev-parse)
+--commit  <sha>       e.g. abc1234                      (auto: git rev-parse --short)
+--pr      <number>    GitHub PR number                  (auto: gh pr view)
+--workdir <label>     worktree dir + zellij session     (auto-detected)
 --env     <label>     e.g. local, staging, prod
 --url     <origin>    e.g. http://localhost:3000
 ```

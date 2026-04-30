@@ -11,7 +11,7 @@ use askama::Template;
 
 use crate::md;
 use crate::models::{
-    relative_time, rollup, Attachment, Feedback, FeedbackTarget, Result as TestResult, Run,
+    relative_time, rollup, Attachment, Feedback, FeedbackTarget, Result as TestResult, Review, Run,
     RunNote, RunStep, RunTest,
 };
 use crate::storage;
@@ -236,6 +236,12 @@ struct RunsTableTpl {
     rows: Vec<RunRow>,
 }
 
+struct ReviewRow {
+    review: Review,
+    text_html: String,
+    relative_created: String,
+}
+
 #[derive(Template)]
 #[template(path = "run.html")]
 struct RunTpl {
@@ -245,6 +251,7 @@ struct RunTpl {
     relative_completed: Option<String>,
     tests: Vec<TestRow>,
     notes: Vec<NoteRow>,
+    reviews: Vec<ReviewRow>,
     counts: ResultCounts,
     rollup: Option<TestResult>,
     other_runs: Vec<Run>,
@@ -263,6 +270,7 @@ struct RunBodyTpl {
     relative_completed: Option<String>,
     tests: Vec<TestRow>,
     notes: Vec<NoteRow>,
+    reviews: Vec<ReviewRow>,
     counts: ResultCounts,
     rollup: Option<TestResult>,
     findings: i64,
@@ -390,6 +398,7 @@ async fn run_page(
         kind_counts: body.kind_counts,
         pr_summary_md: body.pr_summary_md,
         pr_summary_html: body.pr_summary_html,
+        reviews: body.reviews,
     }))
 }
 
@@ -506,7 +515,17 @@ async fn build_run_body(state: &AppState, id: i64) -> Result<RunBodyTpl, AppErro
         .collect();
 
     let run_rollup = rollup(&all_latest);
-    let pr_summary_md = render_pr_summary(&run, run_rollup, &counts, &notes, &tests_out);
+    let reviews: Vec<ReviewRow> = db
+        .reviews_for_run(id)?
+        .into_iter()
+        .map(|r| ReviewRow {
+            text_html: md::to_html(&r.text),
+            relative_created: relative_time(&r.created_at),
+            review: r,
+        })
+        .collect();
+
+    let pr_summary_md = render_pr_summary(&run, run_rollup, &counts, &notes, &tests_out, &reviews);
     let pr_summary_html = md::to_html(&pr_summary_md);
 
     let description_html = if run.description.is_empty() {
@@ -528,6 +547,7 @@ async fn build_run_body(state: &AppState, id: i64) -> Result<RunBodyTpl, AppErro
         kind_counts,
         pr_summary_md,
         pr_summary_html,
+        reviews,
     })
 }
 
@@ -560,6 +580,7 @@ fn render_pr_summary(
     counts: &ResultCounts,
     notes: &[NoteRow],
     tests: &[TestRow],
+    reviews: &[ReviewRow],
 ) -> String {
     let mut s = String::new();
     let rollup_label = rollup.map(|r| r.label()).unwrap_or("no steps");
@@ -574,6 +595,13 @@ fn render_pr_summary(
     }
     if !run.commit_sha.is_empty() {
         meta_bits.push(format!("commit `{}`", run.commit_sha));
+    }
+    if let Some(n) = run.pr_number {
+        if run.pr_url_is_safe() {
+            meta_bits.push(format!("PR [#{}]({})", n, run.pr_url));
+        } else {
+            meta_bits.push(format!("PR `#{}`", n));
+        }
     }
     if !run.env.is_empty() {
         meta_bits.push(format!("env `{}`", run.env));
@@ -592,6 +620,19 @@ fn render_pr_summary(
         "\n**Steps**: {} pass · {} fail · {} warn · {} skip\n",
         counts.pass, counts.fail, counts.warning, counts.skipped
     ));
+
+    if !reviews.is_empty() {
+        s.push_str(&format!("\n### Reviews ({})\n\n", reviews.len()));
+        for r in reviews {
+            s.push_str(&format!(
+                "- {} **{} — {}**: {}\n",
+                r.review.kind.emoji(),
+                r.review.kind.label(),
+                r.review.verdict.label(),
+                r.review.text.replace('\n', " ").trim()
+            ));
+        }
+    }
 
     if !notes.is_empty() {
         s.push_str(&format!("\n### Findings ({})\n\n", notes.len()));
@@ -650,12 +691,14 @@ fn render_markdown_export(b: &RunBodyTpl) -> String {
     }
 
     // Metadata block
+    let pr_str = b.run.pr_number.map(|n| format!("#{n}")).unwrap_or_default();
     let meta_lines: Vec<String> = [
-        ("Branch", &b.run.branch),
-        ("Commit", &b.run.commit_sha),
-        ("Env", &b.run.env),
-        ("URL", &b.run.url),
-        ("Workdir", &b.run.workdir),
+        ("Branch", b.run.branch.as_str()),
+        ("Commit", b.run.commit_sha.as_str()),
+        ("PR", pr_str.as_str()),
+        ("Env", b.run.env.as_str()),
+        ("URL", b.run.url.as_str()),
+        ("Workdir", b.run.workdir.as_str()),
     ]
     .iter()
     .filter_map(|(k, v)| {
@@ -669,6 +712,20 @@ fn render_markdown_export(b: &RunBodyTpl) -> String {
     if !meta_lines.is_empty() {
         s.push_str(&meta_lines.join("\n"));
         s.push_str("\n\n");
+    }
+
+    if !b.reviews.is_empty() {
+        s.push_str(&format!("## Reviews ({})\n\n", b.reviews.len()));
+        for r in &b.reviews {
+            s.push_str(&format!(
+                "### {} {} — {}\n\n",
+                r.review.kind.emoji(),
+                r.review.kind.label(),
+                r.review.verdict.label(),
+            ));
+            s.push_str(&r.review.text);
+            s.push_str("\n\n");
+        }
     }
 
     s.push_str(&format!("- **Started**: {}\n", b.run.started_at));

@@ -23,6 +23,17 @@
 <div class="meta-bar">
   {% if !run.branch.is_empty() %}<span><strong>branch</strong> <code>{{ run.branch }}</code></span>{% endif %}
   {% if !run.commit_sha.is_empty() %}<span><strong>commit</strong> <code>{{ run.commit_sha }}</code></span>{% endif %}
+  {% match run.pr_number %}
+    {% when Some with (n) %}
+      <span><strong>PR</strong>
+        {% if run.pr_url_is_safe() %}
+          <a href="{{ run.pr_url }}" target="_blank" rel="noopener noreferrer"><code>#{{ n }}</code></a>
+        {% else %}
+          <code>#{{ n }}</code>
+        {% endif %}
+      </span>
+    {% when None %}
+  {% endmatch %}
   {% if !run.env.is_empty() %}<span><strong>env</strong> <code>{{ run.env }}</code></span>{% endif %}
   {% if !run.workdir.is_empty() %}<span><strong>workdir</strong> <code>{{ run.workdir }}</code></span>{% endif %}
   {% if !run.url.is_empty() %}<span><strong>url</strong>
@@ -65,6 +76,25 @@
     <div class="pr-summary-md md-content">{{ pr_summary_html|safe }}</div>
   </div>
 </details>
+
+{% if !reviews.is_empty() %}
+<div class="reviews-section">
+  <h2 style="margin-top: 1.2rem;">
+    Reviews
+    <span class="muted" style="font-size: 0.85rem; font-weight: 400;">({{ reviews.len() }})</span>
+  </h2>
+  {% for r in reviews %}
+    <div class="review-card review-verdict-{{ r.review.verdict.as_str() }}">
+      <div class="review-header">
+        <span class="pill review-verdict-pill review-verdict-{{ r.review.verdict.as_str() }}-pill">{{ r.review.verdict.label() }}</span>
+        <span class="review-kind">{{ r.review.kind.emoji() }} {{ r.review.kind.label() }}</span>
+        <span class="muted review-time" title="{{ r.review.created_at }}">{{ r.relative_created }}</span>
+      </div>
+      <div class="review-body md-content">{{ r.text_html|safe }}</div>
+    </div>
+  {% endfor %}
+</div>
+{% endif %}
 
 {% if findings > 0 %}
 <div id="findings" class="findings-banner">

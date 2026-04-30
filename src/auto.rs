@@ -3,20 +3,25 @@ use std::process::Command;
 
 /// Best-effort metadata pulled from the current shell + git working tree.
 /// Each field is `None` when detection fails or isn't applicable. Used to
-/// fill in `--branch`, `--commit`, and `--workdir` when the agent didn't
-/// pass them explicitly.
+/// fill in `--branch`, `--commit`, `--workdir`, and `--pr` when the agent
+/// didn't pass them explicitly.
 #[derive(Debug, Default)]
 pub struct AutoMeta {
     pub branch: Option<String>,
     pub commit: Option<String>,
     pub workdir: Option<String>,
+    pub pr_number: Option<i64>,
+    pub pr_url: Option<String>,
 }
 
 pub fn detect() -> AutoMeta {
+    let (pr_number, pr_url) = gh_pr();
     AutoMeta {
         branch: git_branch(),
         commit: git_short_sha(),
         workdir: workdir_label(),
+        pr_number,
+        pr_url,
     }
 }
 
@@ -78,6 +83,27 @@ fn zellij_session() -> Option<String> {
         .ok()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
+}
+
+/// Returns `(pr_number, pr_html_url)` when `gh` is on PATH AND there's an
+/// open PR for the current branch on the default remote. Both `None` if not.
+/// `gh pr view` returns non-zero (and we silently no-op) when there's no PR,
+/// no remote, no auth, or `gh` is not installed.
+fn gh_pr() -> (Option<i64>, Option<String>) {
+    let out = match Command::new("gh")
+        .args(["pr", "view", "--json", "number,url"])
+        .output()
+    {
+        Ok(out) if out.status.success() => out,
+        _ => return (None, None),
+    };
+    let v: serde_json::Value = match serde_json::from_slice(&out.stdout) {
+        Ok(v) => v,
+        Err(_) => return (None, None),
+    };
+    let number = v.get("number").and_then(|n| n.as_i64());
+    let url = v.get("url").and_then(|u| u.as_str()).map(|s| s.to_string());
+    (number, url)
 }
 
 fn run_git(args: &[&str]) -> Option<String> {
