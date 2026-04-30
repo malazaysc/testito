@@ -185,6 +185,25 @@
     padding: 0.55rem 0.75rem;
     margin: 0.4rem 0;
   }
+  /* Agent replies use a distinct color so the human can scan
+     conversations at a glance without reading the pill. */
+  .feedback-item.feedback-author-agent {
+    background: rgba(168,85,247,.06);
+    border-color: rgba(168,85,247,.30);
+    border-left-color: rgb(168,85,247);
+  }
+  .feedback-item.feedback-author-agent .pill-feedback {
+    background: rgba(168,85,247,.18);
+    color: rgb(168,85,247);
+    border-color: rgba(168,85,247,.40);
+  }
+  /* Replies indent under their parent so the thread structure is visible. */
+  .feedback-replies {
+    margin: 0.45rem 0 0.1rem 1.2rem;
+    border-left: 2px solid rgba(255,255,255,.08);
+    padding-left: 0.7rem;
+  }
+  .feedback-reply { margin: 0.3rem 0; padding: 0.45rem 0.65rem; font-size: 0.92rem; }
   .feedback-item-header {
     display: flex; gap: 0.5rem; align-items: center; margin-bottom: 0.3rem;
   }

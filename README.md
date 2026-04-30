@@ -110,6 +110,7 @@ testito list   [--limit N] [--json]
 testito show   [--run NAME|ID] [--branch X] [--pr N] [--json]
 testito triage [--run NAME|ID] [--branch X] [--pr N] [--json] [--no-mark-seen] [--all]
 testito feedback [--run NAME|ID] [--branch X] [--pr N] [--unseen] [--no-mark-seen] [--json]
+testito reply --feedback ID --text "..."
 testito review --run NAME --kind <security|code|perf|other>
                           --verdict <clean|advisory|blocking|approve|approve-with-suggestions|request-changes>
                           --text "..."

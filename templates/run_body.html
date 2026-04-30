@@ -150,12 +150,25 @@
 
         <div class="feedback-thread" id="feedback-note-{{ n.note.id }}">
           {% for f in n.feedback %}
-            <div class="feedback-item" data-feedback-id="{{ f.feedback.id }}">
+            <div class="feedback-item feedback-author-{{ f.feedback.author.as_str() }}" data-feedback-id="{{ f.feedback.id }}">
               <div class="feedback-item-header">
-                <span class="pill pill-feedback">👤 You</span>
+                <span class="pill pill-feedback">{{ f.feedback.author.label() }}</span>
                 <span class="muted feedback-time" title="{{ f.feedback.created_at }}">{{ f.relative_created }}</span>
               </div>
               <div class="feedback-text md-content">{{ f.text_html|safe }}</div>
+              {% if !f.replies.is_empty() %}
+                <div class="feedback-replies">
+                  {% for rep in f.replies %}
+                    <div class="feedback-item feedback-reply feedback-author-{{ rep.feedback.author.as_str() }}" data-feedback-id="{{ rep.feedback.id }}">
+                      <div class="feedback-item-header">
+                        <span class="pill pill-feedback">{{ rep.feedback.author.label() }}</span>
+                        <span class="muted feedback-time" title="{{ rep.feedback.created_at }}">{{ rep.relative_created }}</span>
+                      </div>
+                      <div class="feedback-text md-content">{{ rep.text_html|safe }}</div>
+                    </div>
+                  {% endfor %}
+                </div>
+              {% endif %}
             </div>
           {% endfor %}
         </div>
@@ -215,12 +228,25 @@
         <div class="test-body">
           <div class="feedback-thread" id="feedback-test-{{ t.test.id }}">
             {% for f in t.feedback %}
-              <div class="feedback-item" data-feedback-id="{{ f.feedback.id }}">
+              <div class="feedback-item feedback-author-{{ f.feedback.author.as_str() }}" data-feedback-id="{{ f.feedback.id }}">
                 <div class="feedback-item-header">
-                  <span class="pill pill-feedback">👤 You</span>
+                  <span class="pill pill-feedback">{{ f.feedback.author.label() }}</span>
                   <span class="muted feedback-time" title="{{ f.feedback.created_at }}">{{ f.relative_created }}</span>
                 </div>
                 <div class="feedback-text md-content">{{ f.text_html|safe }}</div>
+                {% if !f.replies.is_empty() %}
+                  <div class="feedback-replies">
+                    {% for rep in f.replies %}
+                      <div class="feedback-item feedback-reply feedback-author-{{ rep.feedback.author.as_str() }}" data-feedback-id="{{ rep.feedback.id }}">
+                        <div class="feedback-item-header">
+                          <span class="pill pill-feedback">{{ rep.feedback.author.label() }}</span>
+                          <span class="muted feedback-time" title="{{ rep.feedback.created_at }}">{{ rep.relative_created }}</span>
+                        </div>
+                        <div class="feedback-text md-content">{{ rep.text_html|safe }}</div>
+                      </div>
+                    {% endfor %}
+                  </div>
+                {% endif %}
               </div>
             {% endfor %}
           </div>

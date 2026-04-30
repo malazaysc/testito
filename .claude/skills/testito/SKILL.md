@@ -117,6 +117,12 @@ testito list   [--limit N] [--json]
 testito show   --run NAME [--json]
 testito feedback --run NAME [--unseen] [--no-mark-seen] [--json]
 
+testito reply --feedback <id> --text "..."
+    Reply inline to a specific piece of feedback. Threads under the parent
+    on the dashboard (👤 You vs 🤖 Agent), does NOT pollute the findings
+    list. Use this whenever the human asked you a question or left an
+    instruction — it's the right shape for a conversation.
+
 testito review --run "<name>" --kind <security|code|perf|other>
               --verdict <clean|advisory|blocking|approve|approve-with-suggestions|request-changes>
               --text "..."
@@ -174,10 +180,21 @@ The dashboard has a `💬 Add feedback` box on each finding and on each test hea
    testito feedback --run "$RUN" --unseen --json
    ```
    This returns the new feedback as JSON, grouped by target (note/test/run). Marks each as seen on read so the next `--unseen` call is empty unless the human added more.
-3. Act on each item:
-   - Question on one of YOUR findings → file the answer (e.g. `testito jot --run X --kind info --text "Re finding #3: confirmed expected behavior, see PRD link X."`).
-   - Instruction on a test → follow it. If they said "skip the rest", `testito report` the remaining steps as `--result skipped` with a note pointing at the feedback.
-   - Question to you → answer with `testito jot --kind info --text "..."` so the answer lives in the run.
+3. Act on each item. **Reply inline, don't jot:**
+   - Use `testito reply --feedback <id> --text "..."` to answer a specific
+     piece of feedback. The reply threads under the original on the
+     dashboard (with a 🤖 Agent pill) and does NOT show up in the findings
+     list — exactly what you want for a conversational response.
+   - Question on one of YOUR findings ("does this also reproduce on
+     Safari?") → `testito reply --feedback <id> --text "Confirmed on
+     Safari 17, attaching screenshot..."`.
+   - Instruction on a test ("skip the rest") → reply to acknowledge, then
+     `testito report` the remaining steps as `--result skipped` with a
+     note pointing at the feedback id.
+   - Question to you → reply with the answer.
+   - **Do not** use `testito jot` to respond to feedback. Jot is for net-new
+     out-of-scope findings; replies belong nested under the feedback that
+     prompted them.
 4. Don't ignore feedback. The human typed it because they want a response — silence here is exactly the failure mode this whole skill is fighting.
 
 `--no-mark-seen` peeks without acking — useful if you want to glance and come back. `testito feedback --run X` (no flags) lists every feedback item ever left on the run, in chronological order.

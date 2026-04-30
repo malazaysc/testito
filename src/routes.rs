@@ -78,7 +78,14 @@ async fn post_feedback(
             form.run_id
         )));
     }
-    let id = db.insert_feedback(form.run_id, target_kind, form.target_id, text)?;
+    let id = db.insert_feedback(
+        form.run_id,
+        target_kind,
+        form.target_id,
+        text,
+        None,
+        crate::models::FeedbackAuthor::Human,
+    )?;
     let f = Feedback {
         id,
         run_id: form.run_id,
@@ -87,6 +94,8 @@ async fn post_feedback(
         text: text.to_string(),
         created_at: chrono::Utc::now().to_rfc3339(),
         seen_at: None,
+        parent_feedback_id: None,
+        author: crate::models::FeedbackAuthor::Human,
     };
     Ok(render(FeedbackItemTpl::from(&f)))
 }
@@ -308,9 +317,30 @@ struct FeedbackItemTpl {
     feedback: Feedback,
     text_html: String,
     relative_created: String,
+    replies: Vec<FeedbackReplyTpl>,
+}
+
+/// A reply nested under a top-level feedback item. Same data shape minus the
+/// `replies` recursion (replies-of-replies aren't supported — keeps the
+/// thread shallow and the dashboard scannable).
+struct FeedbackReplyTpl {
+    feedback: Feedback,
+    text_html: String,
+    relative_created: String,
 }
 
 impl FeedbackItemTpl {
+    fn from(f: &Feedback) -> Self {
+        Self {
+            text_html: md::to_html(&f.text),
+            relative_created: relative_time(&f.created_at),
+            feedback: f.clone(),
+            replies: Vec::new(),
+        }
+    }
+}
+
+impl FeedbackReplyTpl {
     fn from(f: &Feedback) -> Self {
         Self {
             text_html: md::to_html(&f.text),
@@ -424,12 +454,29 @@ async fn build_run_body(state: &AppState, id: i64) -> Result<RunBodyTpl, AppErro
 
     // Same idea for feedback — one fetch, group by target.
     let all_feedback = db.feedback_for_run(id)?;
+    // First pass: collect replies keyed by their parent_feedback_id.
+    let mut replies_by_parent: std::collections::HashMap<i64, Vec<FeedbackReplyTpl>> =
+        std::collections::HashMap::new();
+    for f in &all_feedback {
+        if let Some(pid) = f.parent_feedback_id {
+            replies_by_parent
+                .entry(pid)
+                .or_default()
+                .push(FeedbackReplyTpl::from(f));
+        }
+    }
+    // Second pass: build top-level FeedbackItemTpls (skip replies) and attach
+    // their accumulated replies in chronological order.
     let mut feedback_by_note: std::collections::HashMap<i64, Vec<FeedbackItemTpl>> =
         std::collections::HashMap::new();
     let mut feedback_by_test: std::collections::HashMap<i64, Vec<FeedbackItemTpl>> =
         std::collections::HashMap::new();
     for f in &all_feedback {
-        let item = FeedbackItemTpl::from(f);
+        if f.parent_feedback_id.is_some() {
+            continue;
+        }
+        let mut item = FeedbackItemTpl::from(f);
+        item.replies = replies_by_parent.remove(&f.id).unwrap_or_default();
         match f.target_kind {
             FeedbackTarget::Note => feedback_by_note.entry(f.target_id).or_default().push(item),
             FeedbackTarget::Test => feedback_by_test.entry(f.target_id).or_default().push(item),

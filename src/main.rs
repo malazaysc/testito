@@ -16,8 +16,8 @@ mod storage;
 
 use db::Db;
 use models::{
-    relative_time, rollup, AttachmentTarget, FeedbackTarget, Kind, Result as TestResult,
-    ReviewKind, ReviewVerdict, RunMeta, RunStep, Scope,
+    relative_time, rollup, AttachmentTarget, FeedbackAuthor, FeedbackTarget, Kind,
+    Result as TestResult, ReviewKind, ReviewVerdict, RunMeta, RunStep, Scope,
 };
 
 #[derive(Parser, Debug)]
@@ -73,6 +73,13 @@ enum Cmd {
     /// `/security-review`-style agents instead of dumping the verdict into
     /// chat.
     Review(ReviewArgs),
+
+    /// Reply inline to a specific piece of feedback (the human said
+    /// "ok confirmed expected behavior" — answer it without filing a new
+    /// finding). Threads under the parent on the dashboard with a 🤖 Agent
+    /// pill, and DOES NOT show up in `triage`'s findings list — exactly
+    /// what `testito jot` would have done wrong.
+    Reply(ReplyArgs),
 }
 
 #[derive(Args, Debug, Default)]
@@ -336,6 +343,24 @@ struct FeedbackArgs {
 }
 
 #[derive(Args, Debug)]
+struct ReplyArgs {
+    /// Id of the feedback you're replying to. Get it from
+    /// `testito feedback --json` or `testito triage --json`.
+    #[arg(long = "feedback")]
+    feedback_id: i64,
+
+    /// The reply body. Markdown is rendered in the dashboard. Lead with
+    /// the verdict on the original feedback ("Confirmed — filing as
+    /// NAV-340"), then expand if needed.
+    #[arg(long)]
+    text: String,
+
+    /// SQLite database file (default: platform data dir).
+    #[arg(long)]
+    db: Option<PathBuf>,
+}
+
+#[derive(Args, Debug)]
 struct ReviewArgs {
     /// Run name (auto-creates the run if it doesn't exist, picking up
     /// branch/commit/PR from auto-detect — same as `report`).
@@ -487,6 +512,10 @@ async fn main() -> Result<()> {
         Cmd::Review(a) => {
             let db_path = resolve_db(a.db.clone())?;
             cmd_review(db_path, a)
+        }
+        Cmd::Reply(a) => {
+            let db_path = resolve_db(a.db.clone())?;
+            cmd_reply(db_path, a)
         }
     }
 }
@@ -699,6 +728,29 @@ fn cmd_jot(db_path: PathBuf, a: JotArgs) -> Result<()> {
         kind.emoji(),
         kind.label(),
         attachments_suffix(attached),
+    );
+    Ok(())
+}
+
+fn cmd_reply(db_path: PathBuf, a: ReplyArgs) -> Result<()> {
+    let db = Db::open(&db_path)?;
+    let parent = db
+        .get_feedback(a.feedback_id)?
+        .ok_or_else(|| anyhow::anyhow!("no feedback with id {}", a.feedback_id))?;
+    // Reply inherits the parent's run + target so it threads correctly.
+    let id = db.insert_feedback(
+        parent.run_id,
+        parent.target_kind,
+        parent.target_id,
+        &a.text,
+        Some(parent.id),
+        FeedbackAuthor::Agent,
+    )?;
+    println!(
+        "reply #{id} on feedback #{} (target {} #{})",
+        parent.id,
+        parent.target_kind.as_str(),
+        parent.target_id,
     );
     Ok(())
 }
@@ -1047,10 +1099,23 @@ fn cmd_triage(db_path: PathBuf, a: TriageArgs) -> Result<()> {
         refs_by_step.entry(step_id).or_default().push(note_id);
         steps_by_note.entry(note_id).or_default().push(step_id);
     }
-    // note_id → [feedback_id] for the bidirectional finding↔feedback link.
+    // Group replies under their parent so the JSON nests instead of
+    // flattening the conversation. Top-level rows go in `top_level_feedback`.
+    let mut replies_by_parent: std::collections::HashMap<i64, Vec<&crate::models::Feedback>> =
+        std::collections::HashMap::new();
+    let mut top_level_feedback: Vec<&crate::models::Feedback> = Vec::new();
+    for f in &feedback {
+        if let Some(pid) = f.parent_feedback_id {
+            replies_by_parent.entry(pid).or_default().push(f);
+        } else {
+            top_level_feedback.push(f);
+        }
+    }
+    // note_id → [feedback_id] (top-level only — replies don't directly belong
+    // to a finding, they belong to another feedback item).
     let mut feedback_by_note: std::collections::HashMap<i64, Vec<i64>> =
         std::collections::HashMap::new();
-    for f in &feedback {
+    for f in &top_level_feedback {
         if matches!(f.target_kind, FeedbackTarget::Note) {
             feedback_by_note.entry(f.target_id).or_default().push(f.id);
         }
@@ -1106,13 +1171,24 @@ fn cmd_triage(db_path: PathBuf, a: TriageArgs) -> Result<()> {
                 "cited_by_step_ids": steps_by_note.get(&n.id).cloned().unwrap_or_default(),
                 "reported_at": n.reported_at,
             })).collect::<Vec<_>>(),
-            "feedback": feedback.iter().map(|f| serde_json::json!({
-                "id": f.id,
-                "target_kind": f.target_kind.as_str(),
-                "target_id": f.target_id,
-                "text": f.text,
-                "created_at": f.created_at,
-            })).collect::<Vec<_>>(),
+            "feedback": top_level_feedback.iter().map(|f| {
+                let replies: Vec<_> = replies_by_parent.get(&f.id).cloned().unwrap_or_default()
+                    .into_iter().map(|r| serde_json::json!({
+                        "id": r.id,
+                        "author": r.author.as_str(),
+                        "text": r.text,
+                        "created_at": r.created_at,
+                    })).collect();
+                serde_json::json!({
+                    "id": f.id,
+                    "author": f.author.as_str(),
+                    "target_kind": f.target_kind.as_str(),
+                    "target_id": f.target_id,
+                    "text": f.text,
+                    "created_at": f.created_at,
+                    "replies": replies,
+                })
+            }).collect::<Vec<_>>(),
         });
         println!("{}", serde_json::to_string_pretty(&payload)?);
         return Ok(());
@@ -1231,16 +1307,50 @@ fn cmd_triage(db_path: PathBuf, a: TriageArgs) -> Result<()> {
         println!("Feedback: ✓ none");
     } else {
         let suffix = if a.no_mark_seen { " (peeked)" } else { "" };
-        println!("Feedback ({}){}:", feedback.len(), suffix);
-        for f in &feedback {
+        println!(
+            "Feedback ({} top-level{}):",
+            top_level_feedback.len(),
+            suffix
+        );
+        for f in &top_level_feedback {
             let target = match f.target_kind {
                 FeedbackTarget::Note => format!("note #{}", f.target_id),
                 FeedbackTarget::Test => format!("test #{}", f.target_id),
                 FeedbackTarget::Run => "run".to_string(),
             };
-            println!("  on {} — {}", target, relative_time(&f.created_at));
+            let n_replies = replies_by_parent.get(&f.id).map(|v| v.len()).unwrap_or(0);
+            let reply_note = if n_replies > 0 {
+                format!(
+                    " · {} repl{}",
+                    n_replies,
+                    if n_replies == 1 { "y" } else { "ies" }
+                )
+            } else {
+                String::new()
+            };
+            println!(
+                "  #{} [{}] on {} — {}{}",
+                f.id,
+                f.author.as_str(),
+                target,
+                relative_time(&f.created_at),
+                reply_note,
+            );
             for line in f.text.lines() {
                 println!("    {}", line);
+            }
+            if let Some(replies) = replies_by_parent.get(&f.id) {
+                for r in replies {
+                    println!(
+                        "      ↳ #{} [{}] — {}",
+                        r.id,
+                        r.author.as_str(),
+                        relative_time(&r.created_at),
+                    );
+                    for line in r.text.lines() {
+                        println!("        {}", line);
+                    }
+                }
             }
         }
     }

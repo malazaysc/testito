@@ -4,8 +4,9 @@ use anyhow::Result;
 use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::models::{
-    Attachment, AttachmentTarget, Feedback, FeedbackTarget, Kind, Result as TestResult, Review,
-    ReviewKind, ReviewVerdict, Run, RunMeta, RunNote, RunStep, RunTest, Scope,
+    Attachment, AttachmentTarget, Feedback, FeedbackAuthor, FeedbackTarget, Kind,
+    Result as TestResult, Review, ReviewKind, ReviewVerdict, Run, RunMeta, RunNote, RunStep,
+    RunTest, Scope,
 };
 
 pub struct Db {
@@ -23,6 +24,24 @@ const SELECT_RUN_BASE: &str = "SELECT r.id, r.name, r.description, r.branch, r.c
                     (SELECT COUNT(*) FROM run_steps s JOIN run_tests t ON s.run_test_id = t.id WHERE t.run_id = r.id) as step_count,
                     (SELECT COUNT(*) FROM run_notes WHERE run_id = r.id) as note_count
              FROM runs r ORDER BY r.started_at DESC";
+
+fn map_feedback(r: &rusqlite::Row) -> rusqlite::Result<Feedback> {
+    Ok(Feedback {
+        id: r.get(0)?,
+        run_id: r.get(1)?,
+        target_kind: match r.get::<_, String>(2)?.as_str() {
+            "test" => FeedbackTarget::Test,
+            "run" => FeedbackTarget::Run,
+            _ => FeedbackTarget::Note,
+        },
+        target_id: r.get(3)?,
+        text: r.get(4)?,
+        created_at: r.get(5)?,
+        seen_at: r.get(6)?,
+        parent_feedback_id: r.get(7)?,
+        author: FeedbackAuthor::parse(&r.get::<_, String>(8)?),
+    })
+}
 
 fn map_run(r: &rusqlite::Row) -> rusqlite::Result<Run> {
     Ok(Run {
@@ -113,7 +132,13 @@ CREATE TABLE IF NOT EXISTS feedback (
     target_id INTEGER NOT NULL,
     text TEXT NOT NULL,
     created_at TEXT NOT NULL,
-    seen_at TEXT
+    seen_at TEXT,
+    -- When non-NULL, this row is a reply to another feedback row.
+    -- Cascading delete keeps replies tied to their parent's lifetime.
+    parent_feedback_id INTEGER REFERENCES feedback(id) ON DELETE CASCADE,
+    -- 'human' (dashboard form) or 'agent' (testito reply CLI). Drives the
+    -- 👤 vs 🤖 pill in the thread.
+    author TEXT NOT NULL DEFAULT 'human'
 );
 
 CREATE INDEX IF NOT EXISTS idx_feedback_run ON feedback(run_id);
@@ -182,6 +207,21 @@ impl Db {
         // empty value, unlike a string field).
         if !column_exists(&conn, "runs", "pr_number")? {
             conn.execute("ALTER TABLE runs ADD COLUMN pr_number INTEGER", [])?;
+        }
+        // Threaded feedback: parent linkage + author column. Old feedback
+        // rows default to author='human' which matches their origin (the
+        // dashboard form).
+        if !column_exists(&conn, "feedback", "parent_feedback_id")? {
+            conn.execute(
+                "ALTER TABLE feedback ADD COLUMN parent_feedback_id INTEGER REFERENCES feedback(id) ON DELETE CASCADE",
+                [],
+            )?;
+        }
+        if !column_exists(&conn, "feedback", "author")? {
+            conn.execute(
+                "ALTER TABLE feedback ADD COLUMN author TEXT NOT NULL DEFAULT 'human'",
+                [],
+            )?;
         }
         // Migrate existing run_notes tables to add the kind column (default 'info'
         // so legacy notes show up as informational rather than triaged).
@@ -435,36 +475,48 @@ impl Db {
         target_kind: FeedbackTarget,
         target_id: i64,
         text: &str,
+        parent_feedback_id: Option<i64>,
+        author: FeedbackAuthor,
     ) -> Result<i64> {
         let now = chrono::Utc::now().to_rfc3339();
+        // Replies inherit "seen" status: an agent reply isn't unseen for the
+        // agent (it just authored it). Setting seen_at = now keeps the unseen
+        // count from going up when the agent posts.
+        let seen_at: Option<&str> = if author == FeedbackAuthor::Agent {
+            Some(now.as_str())
+        } else {
+            None
+        };
         self.conn.execute(
-            "INSERT INTO feedback(run_id, target_kind, target_id, text, created_at)
-             VALUES(?1, ?2, ?3, ?4, ?5)",
-            params![run_id, target_kind.as_str(), target_id, text, now],
+            "INSERT INTO feedback(run_id, target_kind, target_id, text, created_at, parent_feedback_id, author, seen_at)
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![run_id, target_kind.as_str(), target_id, text, now, parent_feedback_id, author.as_str(), seen_at],
         )?;
         Ok(self.conn.last_insert_rowid())
     }
 
+    /// Fetch a single feedback row by id (used by `testito reply` to validate
+    /// the parent exists and to look up the run/target it belongs to).
+    pub fn get_feedback(&self, id: i64) -> Result<Option<Feedback>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT id, run_id, target_kind, target_id, text, created_at, seen_at,
+                        parent_feedback_id, author
+                 FROM feedback WHERE id = ?1",
+                params![id],
+                map_feedback,
+            )
+            .optional()?)
+    }
+
     pub fn feedback_for_run(&self, run_id: i64) -> Result<Vec<Feedback>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, run_id, target_kind, target_id, text, created_at, seen_at
+            "SELECT id, run_id, target_kind, target_id, text, created_at, seen_at,
+                    parent_feedback_id, author
              FROM feedback WHERE run_id = ?1 ORDER BY created_at, id",
         )?;
-        let rows = stmt.query_map(params![run_id], |r| {
-            Ok(Feedback {
-                id: r.get(0)?,
-                run_id: r.get(1)?,
-                target_kind: match r.get::<_, String>(2)?.as_str() {
-                    "test" => FeedbackTarget::Test,
-                    "run" => FeedbackTarget::Run,
-                    _ => FeedbackTarget::Note,
-                },
-                target_id: r.get(3)?,
-                text: r.get(4)?,
-                created_at: r.get(5)?,
-                seen_at: r.get(6)?,
-            })
-        })?;
+        let rows = stmt.query_map(params![run_id], map_feedback)?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 

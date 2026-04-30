@@ -287,6 +287,35 @@ impl FeedbackTarget {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FeedbackAuthor {
+    Human,
+    Agent,
+}
+
+impl FeedbackAuthor {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Human => "human",
+            Self::Agent => "agent",
+        }
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Human => "👤 You",
+            Self::Agent => "🤖 Agent",
+        }
+    }
+
+    pub fn parse(s: &str) -> Self {
+        match s.to_ascii_lowercase().as_str() {
+            "agent" | "bot" | "ai" => Self::Agent,
+            _ => Self::Human,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Feedback {
     pub id: i64,
@@ -296,6 +325,9 @@ pub struct Feedback {
     pub text: String,
     pub created_at: String,
     pub seen_at: Option<String>,
+    /// When `Some`, this row is a reply nested under the named feedback.
+    pub parent_feedback_id: Option<i64>,
+    pub author: FeedbackAuthor,
 }
 
 impl AttachmentTarget {
