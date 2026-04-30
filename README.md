@@ -107,9 +107,9 @@ testito note   --run NAME --scope <in|out> --text ...
 testito jot    --run NAME --text ...                          # synonym for note --scope out
 testito end    --run NAME [--fail-if-failures]
 testito list   [--limit N] [--json]
-testito show   --run NAME [--json]
-testito triage --run NAME [--json] [--no-mark-seen] [--all]
-testito feedback --run NAME [--unseen] [--no-mark-seen] [--json]
+testito show   [--run NAME|ID] [--branch X] [--pr N] [--json]
+testito triage [--run NAME|ID] [--branch X] [--pr N] [--json] [--no-mark-seen] [--all]
+testito feedback [--run NAME|ID] [--branch X] [--pr N] [--unseen] [--no-mark-seen] [--json]
 testito review --run NAME --kind <security|code|perf|other>
                           --verdict <clean|advisory|blocking|approve|approve-with-suggestions|request-changes>
                           --text "..."

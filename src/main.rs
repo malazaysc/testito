@@ -305,9 +305,18 @@ struct ListArgs {
 
 #[derive(Args, Debug)]
 struct FeedbackArgs {
-    /// Run name.
+    /// Run name or numeric id. Optional — if omitted, auto-discovers from
+    /// the current branch + `gh pr view`, or from `--branch` / `--pr`.
     #[arg(long)]
-    run: String,
+    run: Option<String>,
+
+    /// Filter discovery to this branch (overrides `git rev-parse`).
+    #[arg(long)]
+    branch: Option<String>,
+
+    /// Filter discovery to this GitHub PR number (overrides `gh pr view`).
+    #[arg(long)]
+    pr: Option<i64>,
 
     /// Show only feedback the agent hasn't read yet. Marks them as seen on read.
     #[arg(long)]
@@ -358,9 +367,18 @@ struct ReviewArgs {
 
 #[derive(Args, Debug)]
 struct TriageArgs {
-    /// Run name.
+    /// Run name or numeric id. Optional — if omitted, auto-discovers from
+    /// the current branch + `gh pr view`, or from `--branch` / `--pr`.
     #[arg(long)]
-    run: String,
+    run: Option<String>,
+
+    /// Filter discovery to this branch (overrides `git rev-parse`).
+    #[arg(long)]
+    branch: Option<String>,
+
+    /// Filter discovery to this GitHub PR number (overrides `gh pr view`).
+    #[arg(long)]
+    pr: Option<i64>,
 
     /// Print as JSON instead of human-readable text.
     #[arg(long)]
@@ -382,9 +400,18 @@ struct TriageArgs {
 
 #[derive(Args, Debug)]
 struct ShowArgs {
-    /// Run name.
+    /// Run name or numeric id. Optional — if omitted, auto-discovers from
+    /// the current branch + `gh pr view`, or from `--branch` / `--pr`.
     #[arg(long)]
-    run: String,
+    run: Option<String>,
+
+    /// Filter discovery to this branch (overrides `git rev-parse`).
+    #[arg(long)]
+    branch: Option<String>,
+
+    /// Filter discovery to this GitHub PR number (overrides `gh pr view`).
+    #[arg(long)]
+    pr: Option<i64>,
 
     /// Print as JSON instead of a human-readable summary.
     #[arg(long)]
@@ -462,6 +489,84 @@ async fn main() -> Result<()> {
             cmd_review(db_path, a)
         }
     }
+}
+
+/// Resolve which run to operate on, given the optional `--run` (name OR
+/// numeric id), `--branch`, and `--pr` flags. Falls back to auto-detection
+/// (`git rev-parse` + `gh pr view`) when nothing is passed. Prints a
+/// `→ using run …` line to stderr when discovery (rather than an explicit
+/// `--run`) chose the run, so the agent can see which run was picked.
+fn resolve_run(
+    db: &Db,
+    run: Option<&str>,
+    branch: Option<&str>,
+    pr: Option<i64>,
+) -> Result<crate::models::Run> {
+    // 1. Explicit --run wins. Try numeric id first, then name.
+    if let Some(r) = run {
+        if let Ok(id) = r.parse::<i64>() {
+            if let Some(run) = db.get_run(id)? {
+                return Ok(run);
+            }
+            anyhow::bail!("no run with id {}", id);
+        }
+        let id = db
+            .find_run_id(r)?
+            .ok_or_else(|| anyhow::anyhow!("run '{}' does not exist", r))?;
+        return db
+            .get_run(id)?
+            .ok_or_else(|| anyhow::anyhow!("run disappeared mid-query"));
+    }
+
+    // 2. Discovery: --branch / --pr override auto-detect; otherwise auto.
+    let auto = auto::detect();
+    let effective_branch = branch.map(|s| s.to_string()).or(auto.branch);
+    let effective_pr = pr.or(auto.pr_number);
+
+    if effective_branch.is_none() && effective_pr.is_none() {
+        anyhow::bail!(
+            "no run name and no discovery signal — pass --run NAME, --branch X, or --pr N \
+             (or run inside a git repo with `gh` available so branch/PR auto-detect)"
+        );
+    }
+
+    let matches = db.find_runs_by_filter(effective_branch.as_deref(), effective_pr)?;
+    if matches.is_empty() {
+        let by = match (&effective_branch, effective_pr) {
+            (Some(b), Some(n)) => format!("branch '{}' and PR #{}", b, n),
+            (Some(b), None) => format!("branch '{}'", b),
+            (None, Some(n)) => format!("PR #{}", n),
+            (None, None) => unreachable!(),
+        };
+        anyhow::bail!(
+            "no runs match {by}. List candidates with `testito list` or pass --run NAME explicitly."
+        );
+    }
+    let picked = matches[0].clone();
+    let by = match (&effective_branch, effective_pr) {
+        (Some(b), Some(n)) => format!("branch={b} pr=#{n}"),
+        (Some(b), None) => format!("branch={b}"),
+        (None, Some(n)) => format!("pr=#{n}"),
+        (None, None) => unreachable!(),
+    };
+    if matches.len() == 1 {
+        eprintln!("→ using run '{}' (id {}) — {by}", picked.name, picked.id);
+    } else {
+        let others: Vec<String> = matches
+            .iter()
+            .skip(1)
+            .map(|r| format!("'{}' (id {})", r.name, r.id))
+            .collect();
+        eprintln!(
+            "→ using run '{}' (id {}) — most recent on {by} ({} other match{}: {})",
+            picked.name,
+            picked.id,
+            others.len(),
+            if others.len() == 1 { "" } else { "es" },
+            others.join(", "),
+        );
+    }
+    Ok(picked)
 }
 
 fn resolve_db(arg: Option<PathBuf>) -> Result<PathBuf> {
@@ -600,9 +705,9 @@ fn cmd_jot(db_path: PathBuf, a: JotArgs) -> Result<()> {
 
 fn cmd_feedback(db_path: PathBuf, a: FeedbackArgs) -> Result<()> {
     let db = Db::open(&db_path)?;
-    let run_id = db
-        .find_run_id(&a.run)?
-        .ok_or_else(|| anyhow::anyhow!("run '{}' does not exist", a.run))?;
+    let run = resolve_run(&db, a.run.as_deref(), a.branch.as_deref(), a.pr)?;
+    let run_id = run.id;
+    let run_name = run.name.clone();
     let mut all = db.feedback_for_run(run_id)?;
     if a.unseen {
         all.retain(|f| f.seen_at.is_none());
@@ -622,13 +727,13 @@ fn cmd_feedback(db_path: PathBuf, a: FeedbackArgs) -> Result<()> {
             targets_test.insert(t.id, t.name);
         }
         let payload = serde_json::json!({
-            "run": a.run,
+            "run": run_name,
             "unseen_only": a.unseen,
             "feedback": all.iter().map(|f| {
                 let target_name = match f.target_kind {
                     FeedbackTarget::Note => targets_note.get(&f.target_id).cloned(),
                     FeedbackTarget::Test => targets_test.get(&f.target_id).cloned(),
-                    FeedbackTarget::Run => Some(a.run.clone()),
+                    FeedbackTarget::Run => Some(run_name.clone()),
                 };
                 serde_json::json!({
                     "id": f.id,
@@ -646,7 +751,7 @@ fn cmd_feedback(db_path: PathBuf, a: FeedbackArgs) -> Result<()> {
         println!(
             "(no {}feedback on '{}')",
             if a.unseen { "unseen " } else { "" },
-            a.run
+            run_name
         );
     } else {
         // Group by target so each piece of feedback shows what it's about.
@@ -679,7 +784,7 @@ fn cmd_feedback(db_path: PathBuf, a: FeedbackArgs) -> Result<()> {
                     "on test \"{}\"",
                     tests.get(&f.target_id).cloned().unwrap_or_default()
                 ),
-                FeedbackTarget::Run => format!("on run {}", a.run),
+                FeedbackTarget::Run => format!("on run {}", run_name),
             };
             let unread = if f.seen_at.is_none() { " (unread)" } else { "" };
             println!("{header}{unread}");
@@ -885,12 +990,8 @@ fn cmd_list(db_path: PathBuf, a: ListArgs) -> Result<()> {
 
 fn cmd_triage(db_path: PathBuf, a: TriageArgs) -> Result<()> {
     let db = Db::open(&db_path)?;
-    let run_id = db
-        .find_run_id(&a.run)?
-        .ok_or_else(|| anyhow::anyhow!("run '{}' does not exist", a.run))?;
-    let run = db
-        .get_run(run_id)?
-        .ok_or_else(|| anyhow::anyhow!("run disappeared mid-query"))?;
+    let run = resolve_run(&db, a.run.as_deref(), a.branch.as_deref(), a.pr)?;
+    let run_id = run.id;
 
     // Gather: failing/warning steps grouped by their parent test, all notes,
     // all feedback. Filter to the actionable subset unless --all.
@@ -1169,12 +1270,8 @@ fn cmd_review(db_path: PathBuf, a: ReviewArgs) -> Result<()> {
 
 fn cmd_show(db_path: PathBuf, a: ShowArgs) -> Result<()> {
     let db = Db::open(&db_path)?;
-    let run_id = db
-        .find_run_id(&a.run)?
-        .ok_or_else(|| anyhow::anyhow!("run '{}' does not exist", a.run))?;
-    let run = db
-        .get_run(run_id)?
-        .ok_or_else(|| anyhow::anyhow!("run disappeared mid-query"))?;
+    let run = resolve_run(&db, a.run.as_deref(), a.branch.as_deref(), a.pr)?;
+    let run_id = run.id;
 
     // Aggregate counts + per-test latest-attempt steps, in one pass.
     let mut counts = (0i64, 0i64, 0i64, 0i64); // (pass, fail, warn, skip)

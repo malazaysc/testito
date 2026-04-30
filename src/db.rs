@@ -249,6 +249,48 @@ impl Db {
         Ok(())
     }
 
+    /// Returns runs matching the given branch and/or PR number, ordered
+    /// most-recent first. Both filters are optional; passing neither returns
+    /// an empty list (use `list_runs` for that). Empty strings are treated
+    /// as "don't filter on this field" so the runs table doesn't surface
+    /// for runs that simply have no branch set.
+    pub fn find_runs_by_filter(&self, branch: Option<&str>, pr: Option<i64>) -> Result<Vec<Run>> {
+        let branch = branch.filter(|b| !b.is_empty());
+        if branch.is_none() && pr.is_none() {
+            return Ok(vec![]);
+        }
+        let mut sql = String::from(SELECT_RUN_BASE_NO_ORDER);
+        sql.push_str(" WHERE ");
+        let mut clauses: Vec<&str> = Vec::new();
+        if branch.is_some() {
+            clauses.push("r.branch = ?1");
+        }
+        if pr.is_some() {
+            clauses.push(if branch.is_some() {
+                "r.pr_number = ?2"
+            } else {
+                "r.pr_number = ?1"
+            });
+        }
+        sql.push_str(&clauses.join(" AND "));
+        sql.push_str(" ORDER BY r.started_at DESC");
+
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows: Vec<Run> = match (branch, pr) {
+            (Some(b), Some(p)) => stmt
+                .query_map(params![b, p], map_run)?
+                .collect::<rusqlite::Result<Vec<_>>>()?,
+            (Some(b), None) => stmt
+                .query_map(params![b], map_run)?
+                .collect::<rusqlite::Result<Vec<_>>>()?,
+            (None, Some(p)) => stmt
+                .query_map(params![p], map_run)?
+                .collect::<rusqlite::Result<Vec<_>>>()?,
+            (None, None) => unreachable!(),
+        };
+        Ok(rows)
+    }
+
     pub fn find_run_id(&self, name: &str) -> Result<Option<i64>> {
         Ok(self
             .conn

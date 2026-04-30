@@ -243,6 +243,23 @@ Reviews are append-only: a follow-up `/security-review` after a code change
 files a new review row instead of mutating the previous one, so the
 assessment history is on the dashboard.
 
+## Discovering the run (when you don't know its name)
+
+`testito triage`, `testito show`, and `testito feedback` all accept these
+flags and auto-discover when none are passed:
+
+```bash
+testito triage --run "<name>"        # exact name
+testito triage --run 14              # numeric id
+testito triage --branch feat/x       # most recent run on branch
+testito triage --pr 340              # most recent run on PR
+testito triage                       # auto: current branch + `gh pr view`
+```
+
+When discovery picks a run, `testito` prints `→ using run '<name>' (id N)
+— …` to stderr so you can confirm. If multiple runs match, it picks the
+most recent and lists the others.
+
 ## Picking up an existing run (act-on-findings mode)
 
 When the user hands you a finished run and says "act on what's there",
