@@ -12,13 +12,13 @@ pub struct Db {
     pub conn: Connection,
 }
 
-const SELECT_RUN_BASE_NO_ORDER: &str = "SELECT r.id, r.name, r.description, r.branch, r.commit_sha, r.env, r.url, r.started_at, r.completed_at,
+const SELECT_RUN_BASE_NO_ORDER: &str = "SELECT r.id, r.name, r.description, r.branch, r.commit_sha, r.env, r.url, r.workdir, r.started_at, r.completed_at,
                     (SELECT COUNT(*) FROM run_tests WHERE run_id = r.id) as test_count,
                     (SELECT COUNT(*) FROM run_steps s JOIN run_tests t ON s.run_test_id = t.id WHERE t.run_id = r.id) as step_count,
                     (SELECT COUNT(*) FROM run_notes WHERE run_id = r.id) as note_count
              FROM runs r";
 
-const SELECT_RUN_BASE: &str = "SELECT r.id, r.name, r.description, r.branch, r.commit_sha, r.env, r.url, r.started_at, r.completed_at,
+const SELECT_RUN_BASE: &str = "SELECT r.id, r.name, r.description, r.branch, r.commit_sha, r.env, r.url, r.workdir, r.started_at, r.completed_at,
                     (SELECT COUNT(*) FROM run_tests WHERE run_id = r.id) as test_count,
                     (SELECT COUNT(*) FROM run_steps s JOIN run_tests t ON s.run_test_id = t.id WHERE t.run_id = r.id) as step_count,
                     (SELECT COUNT(*) FROM run_notes WHERE run_id = r.id) as note_count
@@ -33,11 +33,12 @@ fn map_run(r: &rusqlite::Row) -> rusqlite::Result<Run> {
         commit_sha: r.get(4)?,
         env: r.get(5)?,
         url: r.get(6)?,
-        started_at: r.get(7)?,
-        completed_at: r.get(8)?,
-        test_count: r.get(9)?,
-        step_count: r.get(10)?,
-        note_count: r.get(11)?,
+        workdir: r.get(7)?,
+        started_at: r.get(8)?,
+        completed_at: r.get(9)?,
+        test_count: r.get(10)?,
+        step_count: r.get(11)?,
+        note_count: r.get(12)?,
     })
 }
 
@@ -50,6 +51,7 @@ CREATE TABLE IF NOT EXISTS runs (
     commit_sha TEXT NOT NULL DEFAULT '',
     env TEXT NOT NULL DEFAULT '',
     url TEXT NOT NULL DEFAULT '',
+    workdir TEXT NOT NULL DEFAULT '',
     started_at TEXT NOT NULL,
     completed_at TEXT
 );
@@ -111,6 +113,16 @@ CREATE TABLE IF NOT EXISTS feedback (
 );
 
 CREATE INDEX IF NOT EXISTS idx_feedback_run ON feedback(run_id);
+
+CREATE TABLE IF NOT EXISTS step_finding_refs (
+    step_id INTEGER NOT NULL REFERENCES run_steps(id) ON DELETE CASCADE,
+    note_id INTEGER NOT NULL REFERENCES run_notes(id) ON DELETE CASCADE,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (step_id, note_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_step_finding_refs_step ON step_finding_refs(step_id);
+CREATE INDEX IF NOT EXISTS idx_step_finding_refs_note ON step_finding_refs(note_id);
 "#;
 
 const DROP_LEGACY: &str = r#"
@@ -140,7 +152,7 @@ impl Db {
         // Migrate older runs tables that lack metadata columns. ADD COLUMN is
         // a no-op semantically when the column already exists, but sqlite errors,
         // so we check first.
-        for col in ["branch", "commit_sha", "env", "url"] {
+        for col in ["branch", "commit_sha", "env", "url", "workdir"] {
             if !column_exists(&conn, "runs", col)? {
                 conn.execute(
                     &format!(
@@ -169,8 +181,8 @@ impl Db {
         }
         let now = chrono::Utc::now().to_rfc3339();
         self.conn.execute(
-            "INSERT INTO runs(name, description, branch, commit_sha, env, url, started_at)
-             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT INTO runs(name, description, branch, commit_sha, env, url, workdir, started_at)
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 name,
                 meta.description.as_deref().unwrap_or(""),
@@ -178,6 +190,7 @@ impl Db {
                 meta.commit_sha.as_deref().unwrap_or(""),
                 meta.env.as_deref().unwrap_or(""),
                 meta.url.as_deref().unwrap_or(""),
+                meta.workdir.as_deref().unwrap_or(""),
                 now,
             ],
         )?;
@@ -194,6 +207,7 @@ impl Db {
             ("commit_sha", meta.commit_sha.as_ref()),
             ("env", meta.env.as_ref()),
             ("url", meta.url.as_ref()),
+            ("workdir", meta.workdir.as_ref()),
         ];
         for (col, val) in pairs {
             if let Some(v) = val {
@@ -403,6 +417,37 @@ impl Db {
             |r| r.get(0),
         )?;
         Ok(n)
+    }
+
+    /// Link a step to a finding (run_note). Many-to-many — a step can cite
+    /// several findings (e.g. "this scenario surfaced bugs #28, #29") and a
+    /// finding can be cited by several steps. Idempotent: re-linking the same
+    /// pair is a no-op so retries are safe.
+    pub fn link_step_finding(&self, step_id: i64, note_id: i64) -> Result<()> {
+        let now = chrono::Utc::now().to_rfc3339();
+        self.conn.execute(
+            "INSERT OR IGNORE INTO step_finding_refs(step_id, note_id, created_at)
+             VALUES(?1, ?2, ?3)",
+            params![step_id, note_id, now],
+        )?;
+        Ok(())
+    }
+
+    /// Returns `(step_id, note_id)` pairs for every step→finding ref under
+    /// this run. Caller groups into the shape they need (step→[notes] for
+    /// triage, note→[steps] for the reverse map).
+    pub fn step_finding_refs_for_run(&self, run_id: i64) -> Result<Vec<(i64, i64)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT r.step_id, r.note_id
+             FROM step_finding_refs r
+             JOIN run_steps s ON s.id = r.step_id
+             JOIN run_tests t ON s.run_test_id = t.id
+             WHERE t.run_id = ?1",
+        )?;
+        let rows = stmt.query_map(params![run_id], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     pub fn insert_attachment(

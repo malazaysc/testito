@@ -132,11 +132,18 @@ there's unseen feedback on the run — that's your signal to call
 shows them in a banner so a reviewer knows *what* was tested.
 
 ```
---branch  <name>       e.g. main, feature/checkout
---commit  <sha>        e.g. abc1234
+--branch  <name>       e.g. main, feature/checkout       (auto: `git rev-parse`)
+--commit  <sha>        e.g. abc1234                      (auto: `git rev-parse --short HEAD`)
 --env     <label>      e.g. local, staging, prod
 --url     <origin>     e.g. http://localhost:3000
+--workdir <label>      linked-worktree dir + zellij session  (auto-detected)
 ```
+
+`--branch`, `--commit`, and `--workdir` are filled in automatically from the
+current shell + git working tree if you don't pass them. **Don't pass them
+unless you need to override the auto-detected value** (e.g. you're testing a
+deployed environment whose code lives elsewhere). Always pass `--env` and
+`--url` explicitly — those can't be inferred.
 
 Help: `testito --help`, `testito report --help`, etc.
 
@@ -160,10 +167,52 @@ The dashboard has a `💬 Add feedback` box on each finding and on each test hea
 
 `--no-mark-seen` peeks without acking — useful if you want to glance and come back. `testito feedback --run X` (no flags) lists every feedback item ever left on the run, in chronological order.
 
+## Anchor steps to findings with `--finding-ref`
+
+When a step's `--note` is going to repeat a finding you just filed (e.g.
+the step's whole purpose is to surface i18n gaps and you just jotted
+each gap as a `bug`/`polish` finding), pass `--finding-ref <id>` on
+`testito report` to anchor the step to those findings. Repeatable.
+
+```bash
+# Filed two i18n bugs first
+testito jot --run "$RUN" --kind bug    --text "..." --screenshot ...   # → returns id 33
+testito jot --run "$RUN" --kind polish --text "..." --screenshot ...   # → returns id 34
+
+# Now report the step that surfaced them — anchor instead of duplicating
+testito report --run "$RUN" --test "i18n" --step "Switch locale to Español" \
+  --result warning --note "i18n gaps below" \
+  --finding-ref 33 --finding-ref 34
+```
+
+`testito triage --json` then emits `tests_with_issues[].steps[].finding_refs: [33, 34]` and `findings[].cited_by_step_ids: [<step_id>]`, and trims the step note to its first line. Without anchors, the step's full note text is the only carrier of context, so triage keeps it intact — but the result is fatter. Anchor whenever you can.
+
+The id you pass is the one returned by `testito jot` (printed as `jotted #33 …`) or visible in the dashboard / `testito triage --json`.
+
+## Picking up an existing run (act-on-findings mode)
+
+When the user hands you a finished run and says "act on what's there",
+use `testito triage --run "<name>" --json` instead of `show`. It returns,
+in one call:
+
+- Tests with **fail** or **warning** steps (passes are filtered out).
+  Each step carries `finding_refs: [...]` when it was anchored via
+  `--finding-ref` — chase those into `findings[]` rather than re-reading
+  the step's note.
+- Findings with **kind=bug** or **kind=polish** (questions and info are
+  filtered out unless you pass `--all`). Each finding carries
+  `feedback_ids: [...]` and `cited_by_step_ids: [...]` so you don't have
+  to cross-reference manually.
+- Every feedback item left on the run, marked seen on read.
+
+This is the right entry point for "I QA'd this PR yesterday, fix the
+issues today" workflows — much shorter than walking the full `show`
+output and decides nothing for you.
+
 ## How to test
 
 1. **Pick a run name up front.** Combine purpose + date or build, e.g. `checkout-smoke-2026-04-28`. Use the **same name** for every command in the session.
-2. **Capture metadata up front.** Either via `testito start --run "<name>" --description "..." --branch ... --commit ... --env ... --url ...`, or pass `--branch/--commit/--env/--url` on the first `report`.
+2. **Capture metadata up front.** Pass `--description`, `--env`, and `--url` on `testito start` (or the first `report`). Skip `--branch`/`--commit`/`--workdir` — those auto-detect from `git` and `$ZELLIJ_SESSION_NAME` and you'll usually want the auto-detected value.
 3. **For each step you take, immediately call** `testito report ... --result <pass|fail|warning|skipped>`:
    - `pass` — the verification succeeded.
    - `fail` — the expected outcome did not happen. **Always pair with `--note`** describing the symptom.

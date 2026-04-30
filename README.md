@@ -108,11 +108,15 @@ testito jot    --run NAME --text ...                          # synonym for note
 testito end    --run NAME [--fail-if-failures]
 testito list   [--limit N] [--json]
 testito show   --run NAME [--json]
+testito triage --run NAME [--json] [--no-mark-seen] [--all]
+testito feedback --run NAME [--unseen] [--no-mark-seen] [--json]
 ```
 
 `--fail-if-failures` makes `end` exit `1` when the run's rollup is `fail`. Wire it into CI: agent reports → `testito end --run "$RUN" --fail-if-failures` is the gate.
 
 `list` and `show` mirror what the dashboard renders, but in the terminal — handy for headless / CI runs. `--json` on either gives a stable shape for scripts.
+
+`triage` is the "what do I need to act on?" view. One call returns failed/warning steps, bug/polish notes, and every feedback item — exactly the actionable subset for a coding agent picking up a finished run. Marks feedback as seen by default (use `--no-mark-seen` to peek). Pair with `--json` for parsing.
 
 `jot` is the low-friction "I noticed something off, didn't fit the brief" command. It's a one-liner synonym for `note --scope out`. The skill (in `.claude/skills/testito/SKILL.md`) tells agents to use it freely as they test, so out-of-scope findings get filed in the moment instead of being lost or forgotten.
 

@@ -22,7 +22,7 @@
 
   <div id="run-body"
        hx-get="/runs/{{ run.id }}/body"
-       hx-trigger="every 2s"
+       hx-trigger="every 2s [shouldPollRun()]"
        hx-swap="innerHTML">
     {% include "run_body.html" %}
   </div>
@@ -64,6 +64,16 @@
       card.style.display = show ? '' : 'none';
     });
   }
+  // Pause the 2s poll while the user is typing into a feedback form. Without
+  // this the swap rips the textarea out from under their cursor mid-keystroke,
+  // losing focus and jumping the scroll.
+  function shouldPollRun() {
+    const a = document.activeElement;
+    if (!a) return true;
+    if (a.closest && a.closest('.feedback-form')) return false;
+    return true;
+  }
+
   // Re-apply filter after each htmx poll (the test list is replaced wholesale).
   document.body.addEventListener('htmx:afterSwap', function (e) {
     if (e.target && e.target.id === 'run-body') {

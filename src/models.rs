@@ -144,6 +144,7 @@ pub struct RunMeta {
     pub commit_sha: Option<String>,
     pub env: Option<String>,
     pub url: Option<String>,
+    pub workdir: Option<String>,
 }
 
 impl RunMeta {
@@ -153,6 +154,7 @@ impl RunMeta {
             && self.commit_sha.is_none()
             && self.env.is_none()
             && self.url.is_none()
+            && self.workdir.is_none()
     }
 }
 
@@ -165,6 +167,7 @@ pub struct Run {
     pub commit_sha: String,
     pub env: String,
     pub url: String,
+    pub workdir: String,
     pub started_at: String,
     pub completed_at: Option<String>,
     pub test_count: i64,
@@ -178,6 +181,7 @@ impl Run {
             || !self.commit_sha.is_empty()
             || !self.env.is_empty()
             || !self.url.is_empty()
+            || !self.workdir.is_empty()
     }
 
     /// True only when `self.url` is safe to render as a clickable `<a href>`.
@@ -539,6 +543,7 @@ mod tests {
             commit_sha: String::new(),
             env: String::new(),
             url: url.to_string(),
+            workdir: String::new(),
             started_at: String::new(),
             completed_at: None,
             test_count: 0,

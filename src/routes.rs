@@ -240,6 +240,7 @@ struct RunsTableTpl {
 #[template(path = "run.html")]
 struct RunTpl {
     run: Run,
+    description_html: String,
     relative_started: String,
     relative_completed: Option<String>,
     tests: Vec<TestRow>,
@@ -250,12 +251,14 @@ struct RunTpl {
     findings: i64,
     kind_counts: KindCounts,
     pr_summary_md: String,
+    pr_summary_html: String,
 }
 
 #[derive(Template)]
 #[template(path = "run_body.html")]
 struct RunBodyTpl {
     run: Run,
+    description_html: String,
     relative_started: String,
     relative_completed: Option<String>,
     tests: Vec<TestRow>,
@@ -264,10 +267,8 @@ struct RunBodyTpl {
     rollup: Option<TestResult>,
     findings: i64,
     kind_counts: KindCounts,
-    /// A tight markdown blurb meant for pasting into a PR description /
-    /// review comment. Rendered into a collapsible section at the top of
-    /// the run page with a one-click Copy button.
     pr_summary_md: String,
+    pr_summary_html: String,
 }
 
 #[derive(Template)]
@@ -377,6 +378,7 @@ async fn run_page(
     };
     Ok(render(RunTpl {
         run: body.run,
+        description_html: body.description_html,
         relative_started: body.relative_started,
         relative_completed: body.relative_completed,
         tests: body.tests,
@@ -387,6 +389,7 @@ async fn run_page(
         findings: body.findings,
         kind_counts: body.kind_counts,
         pr_summary_md: body.pr_summary_md,
+        pr_summary_html: body.pr_summary_html,
     }))
 }
 
@@ -504,9 +507,17 @@ async fn build_run_body(state: &AppState, id: i64) -> Result<RunBodyTpl, AppErro
 
     let run_rollup = rollup(&all_latest);
     let pr_summary_md = render_pr_summary(&run, run_rollup, &counts, &notes, &tests_out);
+    let pr_summary_html = md::to_html(&pr_summary_md);
+
+    let description_html = if run.description.is_empty() {
+        String::new()
+    } else {
+        md::to_html(&run.description)
+    };
 
     Ok(RunBodyTpl {
         run,
+        description_html,
         relative_started,
         relative_completed,
         tests: tests_out,
@@ -516,6 +527,7 @@ async fn build_run_body(state: &AppState, id: i64) -> Result<RunBodyTpl, AppErro
         findings,
         kind_counts,
         pr_summary_md,
+        pr_summary_html,
     })
 }
 
@@ -568,6 +580,9 @@ fn render_pr_summary(
     }
     if !run.url.is_empty() {
         meta_bits.push(format!("url <{}>", run.url));
+    }
+    if !run.workdir.is_empty() {
+        meta_bits.push(format!("workdir `{}`", run.workdir));
     }
     if !meta_bits.is_empty() {
         s.push_str(&format!("\n{}\n", meta_bits.join(" · ")));
@@ -640,6 +655,7 @@ fn render_markdown_export(b: &RunBodyTpl) -> String {
         ("Commit", &b.run.commit_sha),
         ("Env", &b.run.env),
         ("URL", &b.run.url),
+        ("Workdir", &b.run.workdir),
     ]
     .iter()
     .filter_map(|(k, v)| {

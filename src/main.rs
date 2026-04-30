@@ -7,6 +7,7 @@ use axum::Router;
 use clap::{Args, Parser, Subcommand};
 use tokio::sync::Mutex;
 
+mod auto;
 mod db;
 mod md;
 mod models;
@@ -59,6 +60,12 @@ enum Cmd {
     /// pick up answers to questions, follow-up instructions, or "ignore
     /// this and move on" guidance from the user.
     Feedback(FeedbackArgs),
+
+    /// One-shot "what do I need to act on?" view of a run. Returns the
+    /// failed/warning steps + bug/polish notes + every feedback item, in
+    /// one call. Marks feedback as seen by default — pass `--no-mark-seen`
+    /// to peek. Pair with `--json` for an agent to parse.
+    Triage(TriageArgs),
 }
 
 #[derive(Args, Debug, Default)]
@@ -78,16 +85,36 @@ struct MetaArgs {
     /// URL or origin under test (e.g. http://localhost:3000).
     #[arg(long)]
     url: Option<String>,
+
+    /// Working-context label (linked git worktree name, zellij session, etc).
+    /// Auto-detected when omitted; pass to override.
+    #[arg(long)]
+    workdir: Option<String>,
 }
 
 impl MetaArgs {
-    fn into_meta(self, description: Option<String>) -> RunMeta {
+    /// Build a `RunMeta`, filling in unset `branch`/`commit`/`workdir` from
+    /// the current shell + git working tree. Explicit flags always win;
+    /// auto-detection is best-effort and silently no-ops if `git` isn't
+    /// available or we're not inside a repo.
+    fn into_meta(mut self, description: Option<String>) -> RunMeta {
+        let auto = auto::detect();
+        if self.branch.is_none() {
+            self.branch = auto.branch;
+        }
+        if self.commit.is_none() {
+            self.commit = auto.commit;
+        }
+        if self.workdir.is_none() {
+            self.workdir = auto.workdir;
+        }
         RunMeta {
             description,
             branch: self.branch,
             commit_sha: self.commit,
             env: self.env,
             url: self.url,
+            workdir: self.workdir,
         }
     }
 }
@@ -151,6 +178,15 @@ struct ReportArgs {
     /// copied into testito's storage dir; the original is no longer needed.
     #[arg(long = "screenshot")]
     screenshots: Vec<PathBuf>,
+
+    /// Anchor this step to one or more findings (run notes) by id.
+    /// Repeatable. Use this on a retry/follow-up step that exists *because
+    /// of* a finding you already filed — it lets `testito triage` skip the
+    /// step's note text (which would otherwise duplicate the finding) and
+    /// emit `finding_refs: [N, …]` instead. Get the id from the dashboard
+    /// or from `testito triage --json`.
+    #[arg(long = "finding-ref")]
+    finding_refs: Vec<i64>,
 
     #[command(flatten)]
     meta: MetaArgs,
@@ -266,6 +302,30 @@ struct FeedbackArgs {
 }
 
 #[derive(Args, Debug)]
+struct TriageArgs {
+    /// Run name.
+    #[arg(long)]
+    run: String,
+
+    /// Print as JSON instead of human-readable text.
+    #[arg(long)]
+    json: bool,
+
+    /// Don't mark feedback as seen — peek without acking.
+    #[arg(long)]
+    no_mark_seen: bool,
+
+    /// Include everything, not just the actionable subset (passes, skipped
+    /// steps, info notes). Use when you want a full picture.
+    #[arg(long)]
+    all: bool,
+
+    /// SQLite database file (default: platform data dir).
+    #[arg(long)]
+    db: Option<PathBuf>,
+}
+
+#[derive(Args, Debug)]
 struct ShowArgs {
     /// Run name.
     #[arg(long)]
@@ -338,6 +398,10 @@ async fn main() -> Result<()> {
             let db_path = resolve_db(a.db.clone())?;
             cmd_feedback(db_path, a)
         }
+        Cmd::Triage(a) => {
+            let db_path = resolve_db(a.db.clone())?;
+            cmd_triage(db_path, a)
+        }
     }
 }
 
@@ -390,14 +454,39 @@ fn cmd_report(db_path: PathBuf, a: ReportArgs) -> Result<()> {
         a.note.as_deref().unwrap_or(""),
     )?;
     let attached = ingest_attachments(&db, AttachmentTarget::Step, step_id, &a.screenshots)?;
+    let mut linked = 0usize;
+    for note_id in &a.finding_refs {
+        // Validate the finding exists and belongs to this run before linking,
+        // so a typo'd id surfaces immediately instead of failing silently.
+        let belongs: i64 = db.conn.query_row(
+            "SELECT COUNT(*) FROM run_notes WHERE id = ?1 AND run_id = ?2",
+            rusqlite::params![note_id, run_id],
+            |r| r.get(0),
+        )?;
+        if belongs == 0 {
+            anyhow::bail!(
+                "--finding-ref {} is not a note on run '{}' (use the id printed by `testito triage` or shown in the dashboard)",
+                note_id,
+                run_name
+            );
+        }
+        db.link_step_finding(step_id, *note_id)?;
+        linked += 1;
+    }
+    let refs_suffix = if linked == 0 {
+        String::new()
+    } else {
+        format!(" · linked {linked} finding{}", plural(linked as i64))
+    };
     println!(
-        "{} · run={} test={} step #{} attempt={}{}",
+        "{} · run={} test={} step #{} attempt={}{}{}",
         result.label(),
         run_name,
         test_name,
         step_id,
         attempt,
         attachments_suffix(attached),
+        refs_suffix,
     );
     nag_about_feedback(&db, run_id, &run_name)?;
     Ok(())
@@ -624,6 +713,20 @@ fn cmd_end(db_path: PathBuf, a: EndArgs) -> Result<()> {
     Ok(())
 }
 
+/// First line of a (possibly multi-line) note, with a `…` marker if more
+/// content was trimmed. Used by `triage` to keep step-note previews tight
+/// when the step is already anchored to a finding that carries the detail.
+fn first_line(s: &str) -> String {
+    let mut lines = s.lines();
+    let first = lines.next().unwrap_or("").trim().to_string();
+    let has_more = lines.next().is_some() || s.len() > first.len();
+    if has_more && !first.is_empty() {
+        format!("{first} …")
+    } else {
+        first
+    }
+}
+
 fn plural(n: i64) -> &'static str {
     if n == 1 {
         ""
@@ -661,6 +764,7 @@ fn cmd_list(db_path: PathBuf, a: ListArgs) -> Result<()> {
                     "commit": r.commit_sha,
                     "env": r.env,
                     "url": r.url,
+                    "workdir": r.workdir,
                     "started_at": r.started_at,
                     "completed_at": r.completed_at,
                     "tests": r.test_count,
@@ -718,6 +822,248 @@ fn cmd_list(db_path: PathBuf, a: ListArgs) -> Result<()> {
     Ok(())
 }
 
+fn cmd_triage(db_path: PathBuf, a: TriageArgs) -> Result<()> {
+    let db = Db::open(&db_path)?;
+    let run_id = db
+        .find_run_id(&a.run)?
+        .ok_or_else(|| anyhow::anyhow!("run '{}' does not exist", a.run))?;
+    let run = db
+        .get_run(run_id)?
+        .ok_or_else(|| anyhow::anyhow!("run disappeared mid-query"))?;
+
+    // Gather: failing/warning steps grouped by their parent test, all notes,
+    // all feedback. Filter to the actionable subset unless --all.
+    let mut hot_tests: Vec<(String, Vec<RunStep>)> = Vec::new();
+    let mut all_latest = Vec::new();
+    for t in db.run_tests(run_id)? {
+        let steps = db.steps_for_test(t.id)?;
+        for s in &steps {
+            all_latest.push(s.clone());
+        }
+        let kept: Vec<RunStep> = if a.all {
+            steps
+        } else {
+            steps
+                .into_iter()
+                .filter(|s| matches!(s.result, TestResult::Fail | TestResult::Warning))
+                .collect()
+        };
+        if !kept.is_empty() {
+            hot_tests.push((t.name, kept));
+        }
+    }
+    let run_rollup = rollup(&all_latest);
+
+    let all_notes = db.notes_for_run(run_id)?;
+    let mut notes: Vec<_> = if a.all {
+        all_notes
+    } else {
+        all_notes
+            .into_iter()
+            .filter(|n| matches!(n.kind, Kind::Bug | Kind::Polish))
+            .collect()
+    };
+    // Bugs first, then polish — matches the dashboard's triage order.
+    notes.sort_by_key(|n| n.kind.sort_priority());
+
+    let feedback = db.feedback_for_run(run_id)?;
+    if !a.no_mark_seen && !feedback.is_empty() {
+        db.mark_run_feedback_seen(run_id)?;
+    }
+
+    // step_id → [note_id] from the step_finding_refs table (one fetch).
+    let mut refs_by_step: std::collections::HashMap<i64, Vec<i64>> =
+        std::collections::HashMap::new();
+    // Reverse: note_id → [step_id] so a finding knows the steps that cited it.
+    let mut steps_by_note: std::collections::HashMap<i64, Vec<i64>> =
+        std::collections::HashMap::new();
+    for (step_id, note_id) in db.step_finding_refs_for_run(run_id)? {
+        refs_by_step.entry(step_id).or_default().push(note_id);
+        steps_by_note.entry(note_id).or_default().push(step_id);
+    }
+    // note_id → [feedback_id] for the bidirectional finding↔feedback link.
+    let mut feedback_by_note: std::collections::HashMap<i64, Vec<i64>> =
+        std::collections::HashMap::new();
+    for f in &feedback {
+        if matches!(f.target_kind, FeedbackTarget::Note) {
+            feedback_by_note.entry(f.target_id).or_default().push(f.id);
+        }
+    }
+
+    if a.json {
+        let payload = serde_json::json!({
+            "run": run.name,
+            "rollup": run_rollup.map(|r| r.as_str()),
+            "branch": run.branch,
+            "commit": run.commit_sha,
+            "env": run.env,
+            "url": run.url,
+            "workdir": run.workdir,
+            "tests_with_issues": hot_tests.iter().map(|(name, steps)| serde_json::json!({
+                "test": name,
+                "steps": steps.iter().map(|s| {
+                    let refs = refs_by_step.get(&s.id).cloned().unwrap_or_default();
+                    // When a step is anchored to findings, the finding text is
+                    // the source of truth — emit only a one-line preview of
+                    // the step note to keep the payload tight. Without refs,
+                    // the note carries the rationale, so keep it in full.
+                    let note_value = if refs.is_empty() {
+                        serde_json::Value::String(s.note.clone())
+                    } else {
+                        serde_json::Value::String(first_line(&s.note))
+                    };
+                    serde_json::json!({
+                        "name": s.name,
+                        "result": s.result.as_str(),
+                        "attempt": s.attempt,
+                        "note": note_value,
+                        "finding_refs": refs,
+                        "reported_at": s.reported_at,
+                    })
+                }).collect::<Vec<_>>(),
+            })).collect::<Vec<_>>(),
+            "findings": notes.iter().map(|n| serde_json::json!({
+                "id": n.id,
+                "kind": n.kind.as_str(),
+                "scope": n.scope.as_str(),
+                "text": n.text,
+                "feedback_ids": feedback_by_note.get(&n.id).cloned().unwrap_or_default(),
+                "cited_by_step_ids": steps_by_note.get(&n.id).cloned().unwrap_or_default(),
+                "reported_at": n.reported_at,
+            })).collect::<Vec<_>>(),
+            "feedback": feedback.iter().map(|f| serde_json::json!({
+                "id": f.id,
+                "target_kind": f.target_kind.as_str(),
+                "target_id": f.target_id,
+                "text": f.text,
+                "created_at": f.created_at,
+            })).collect::<Vec<_>>(),
+        });
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+        return Ok(());
+    }
+
+    println!(
+        "Run: {}{}",
+        run.name,
+        run_rollup
+            .map(|r| format!("  [{}]", r.label()))
+            .unwrap_or_default()
+    );
+    if !run.branch.is_empty() || !run.commit_sha.is_empty() {
+        println!(
+            "  {}{}{}",
+            if run.branch.is_empty() {
+                String::new()
+            } else {
+                format!("branch: {}", run.branch)
+            },
+            if !run.branch.is_empty() && !run.commit_sha.is_empty() {
+                " · "
+            } else {
+                ""
+            },
+            if run.commit_sha.is_empty() {
+                String::new()
+            } else {
+                format!("commit: {}", run.commit_sha)
+            },
+        );
+    }
+    println!();
+
+    if hot_tests.is_empty() {
+        println!("Tests with issues: ✓ none");
+    } else {
+        println!("Tests with issues:");
+        for (name, steps) in &hot_tests {
+            println!("  · {}", name);
+            for s in steps {
+                let attempt = if s.attempt > 1 {
+                    format!(" (try #{})", s.attempt)
+                } else {
+                    String::new()
+                };
+                println!("      [{}] {}{}", s.result.as_str(), s.name, attempt);
+                let refs = refs_by_step.get(&s.id);
+                if let Some(refs) = refs {
+                    let refs_str = refs
+                        .iter()
+                        .map(|n| format!("#{n}"))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    println!("        ↳ findings: {refs_str}");
+                }
+                if !s.note.is_empty() {
+                    if refs.is_some() {
+                        println!("        {}", first_line(&s.note));
+                    } else {
+                        for line in s.note.lines() {
+                            println!("        {}", line);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    println!();
+
+    if notes.is_empty() {
+        println!("Findings: ✓ none filed");
+    } else {
+        println!("Findings ({}):", notes.len());
+        for n in &notes {
+            let scope = match n.scope {
+                Scope::In => "in",
+                Scope::Out => "out",
+            };
+            let fb = feedback_by_note
+                .get(&n.id)
+                .map(|ids| {
+                    let s = ids
+                        .iter()
+                        .map(|i| format!("#{i}"))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    format!("  💬 feedback: {s}")
+                })
+                .unwrap_or_default();
+            println!(
+                "  #{} [{} {}] (scope: {}){}",
+                n.id,
+                n.kind.emoji(),
+                n.kind.label(),
+                scope,
+                fb,
+            );
+            for line in n.text.lines() {
+                println!("    {}", line);
+            }
+        }
+    }
+    println!();
+
+    if feedback.is_empty() {
+        println!("Feedback: ✓ none");
+    } else {
+        let suffix = if a.no_mark_seen { " (peeked)" } else { "" };
+        println!("Feedback ({}){}:", feedback.len(), suffix);
+        for f in &feedback {
+            let target = match f.target_kind {
+                FeedbackTarget::Note => format!("note #{}", f.target_id),
+                FeedbackTarget::Test => format!("test #{}", f.target_id),
+                FeedbackTarget::Run => "run".to_string(),
+            };
+            println!("  on {} — {}", target, relative_time(&f.created_at));
+            for line in f.text.lines() {
+                println!("    {}", line);
+            }
+        }
+    }
+
+    Ok(())
+}
+
 fn cmd_show(db_path: PathBuf, a: ShowArgs) -> Result<()> {
     let db = Db::open(&db_path)?;
     let run_id = db
@@ -756,6 +1102,7 @@ fn cmd_show(db_path: PathBuf, a: ShowArgs) -> Result<()> {
             "commit": run.commit_sha,
             "env": run.env,
             "url": run.url,
+            "workdir": run.workdir,
             "started_at": run.started_at,
             "completed_at": run.completed_at,
             "rollup": run_rollup.map(|r| r.as_str()),
@@ -801,6 +1148,7 @@ fn cmd_show(db_path: PathBuf, a: ShowArgs) -> Result<()> {
         ("Commit", run.commit_sha.as_str()),
         ("Env", run.env.as_str()),
         ("URL", run.url.as_str()),
+        ("Workdir", run.workdir.as_str()),
     ]
     .into_iter()
     .filter(|(_, v)| !v.is_empty())

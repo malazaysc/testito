@@ -17,13 +17,14 @@
   </div>
   <span class="muted">live · 2s</span>
 </div>
-{% if !run.description.is_empty() %}<p class="muted" style="margin-top: 0.25rem;">{{ run.description }}</p>{% endif %}
+{% if !run.description.is_empty() %}<div class="muted md-content run-description" style="margin-top: 0.25rem;">{{ description_html|safe }}</div>{% endif %}
 
 {% if run.has_metadata() %}
 <div class="meta-bar">
   {% if !run.branch.is_empty() %}<span><strong>branch</strong> <code>{{ run.branch }}</code></span>{% endif %}
   {% if !run.commit_sha.is_empty() %}<span><strong>commit</strong> <code>{{ run.commit_sha }}</code></span>{% endif %}
   {% if !run.env.is_empty() %}<span><strong>env</strong> <code>{{ run.env }}</code></span>{% endif %}
+  {% if !run.workdir.is_empty() %}<span><strong>workdir</strong> <code>{{ run.workdir }}</code></span>{% endif %}
   {% if !run.url.is_empty() %}<span><strong>url</strong>
     {% if run.url_is_safe() %}
       <a href="{{ run.url }}" target="_blank" rel="noopener noreferrer">{{ run.url }}</a>
@@ -58,9 +59,10 @@
   </summary>
   <div class="pr-summary-body">
     <button type="button" class="copy-btn pr-summary-copy"
-            onclick="copyFromSibling(this)"
-            title="Copy the markdown blurb to clipboard">📋 copy markdown</button>
-    <pre class="pr-summary-md">{{ pr_summary_md }}</pre>
+            data-copy-text="{{ pr_summary_md }}"
+            onclick="copyFromAttr(this)"
+            title="Copy the markdown source to clipboard">📋 copy markdown</button>
+    <div class="pr-summary-md md-content">{{ pr_summary_html|safe }}</div>
   </div>
 </details>
 
