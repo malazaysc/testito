@@ -1,6 +1,6 @@
 ---
 name: testito
-description: Use this skill when running manual or automated tests where you (the agent) execute steps and need to log a structured pass/fail/warning record per step. Wraps the `testito` CLI to write each step result, attempt number, and any notes to a local SQLite log that the user views in a web dashboard. Trigger when the user says "run these tests", "verify the X flow", "QA the build", or asks you to record what you tested.
+description: Use this skill when running tests OR producing a code/security/perf review on a PR or branch — anything where the user wants the result logged as a structured artifact instead of dumped in chat. Wraps the `testito` CLI to write step results (pass/fail/warning/skipped), findings (bug/polish/question/info), and one-shot review verdicts (security/code/perf × clean/advisory/blocking) to a local SQLite log the user views in a web dashboard. Trigger on phrases like "run these tests", "verify the X flow", "QA the build", "smoke-test", "regression-check", "review this PR", "security review", "audit this diff", "code review", or any prompt that ends with "report to testito".
 ---
 
 # testito — step-by-step test reporting
