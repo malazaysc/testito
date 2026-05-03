@@ -157,6 +157,12 @@ struct ServeArgs {
     #[arg(short, long, default_value_t = 7878)]
     port: u16,
 
+    /// Address to bind. Defaults to 127.0.0.1 (loopback only — safest).
+    /// Use 0.0.0.0 to expose on all interfaces (incl. LAN), or pin to your
+    /// Tailscale IP (e.g. 100.x.x.x) to allow only Tailscale peers.
+    #[arg(long, default_value = "127.0.0.1")]
+    bind: String,
+
     /// SQLite database file (default: platform data dir).
     #[arg(long)]
     db: Option<PathBuf>,
@@ -466,12 +472,13 @@ async fn main() -> Result<()> {
 
     let cmd = cli.cmd.unwrap_or(Cmd::Serve(ServeArgs {
         port: 7878,
+        bind: "127.0.0.1".to_string(),
         db: None,
     }));
     match cmd {
         Cmd::Serve(a) => {
             let db_path = resolve_db(a.db)?;
-            serve(db_path, a.port).await
+            serve(db_path, &a.bind, a.port).await
         }
         Cmd::Start(a) => {
             let db_path = resolve_db(a.db.clone())?;
@@ -606,14 +613,23 @@ fn resolve_db(arg: Option<PathBuf>) -> Result<PathBuf> {
     Ok(path)
 }
 
-async fn serve(db_path: PathBuf, port: u16) -> Result<()> {
+async fn serve(db_path: PathBuf, bind: &str, port: u16) -> Result<()> {
     tracing::info!("opening db at {}", db_path.display());
     let db = Db::open(&db_path)?;
     let state = AppState {
         db: Arc::new(Mutex::new(db)),
     };
     let app: Router = routes::router(state);
-    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    let ip: std::net::IpAddr = bind
+        .parse()
+        .map_err(|e| anyhow::anyhow!("invalid --bind '{}': {}", bind, e))?;
+    let addr = SocketAddr::new(ip, port);
+    if !ip.is_loopback() {
+        tracing::warn!(
+            "listening on {} — not loopback. testito has no auth; only do this on a trusted network (e.g. Tailscale)",
+            addr
+        );
+    }
     tracing::info!("listening on http://{}", addr);
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;
