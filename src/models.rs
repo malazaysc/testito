@@ -456,6 +456,20 @@ pub struct Review {
     pub created_at: String,
 }
 
+/// A single test case authored on a run by a coding agent for a QA agent to
+/// execute. Markdown body holds steps + pass criteria. `ordinal` is 1-indexed
+/// and stable per run — it's the handle the QA agent passes to
+/// `report --plan N` to link results back to the plan.
+#[derive(Debug, Clone)]
+pub struct PlanItem {
+    pub id: i64,
+    pub run_id: i64,
+    pub ordinal: i64,
+    pub name: String,
+    pub body: String,
+    pub created_at: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct RunNote {
     pub id: i64,

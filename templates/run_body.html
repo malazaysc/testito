@@ -96,6 +96,37 @@
 </div>
 {% endif %}
 
+{% if !plan.is_empty() %}
+<div class="plan-section">
+  <h2 style="margin-top: 1.2rem;">
+    Plan
+    <span class="muted" style="font-size: 0.85rem; font-weight: 400;">({{ plan.len() }} item{% if plan.len() != 1 %}s{% endif %})</span>
+  </h2>
+  <div class="card" style="padding: 0.5rem 0.85rem;">
+    <ul class="bare">
+    {% for p in plan %}
+      <li class="plan-row">
+        <div class="plan-header">
+          {% match p.verdict %}
+            {% when Some with (s) %}<span class="pill pill-{{ s.as_str() }}">{{ s.label() }}</span>
+            {% when None %}<span class="pill pill-not_run">pending</span>
+          {% endmatch %}
+          <strong class="plan-ordinal">#{{ p.item.ordinal }}</strong>
+          <span class="plan-name">{{ p.item.name }}</span>
+        </div>
+        {% if !p.body_html.is_empty() %}
+        <details class="plan-body">
+          <summary>show steps</summary>
+          <div class="md-content">{{ p.body_html|safe }}</div>
+        </details>
+        {% endif %}
+      </li>
+    {% endfor %}
+    </ul>
+  </div>
+</div>
+{% endif %}
+
 {% if findings > 0 %}
 <div id="findings" class="findings-banner">
   <div class="findings-banner-icon">📋</div>

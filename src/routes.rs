@@ -11,8 +11,8 @@ use askama::Template;
 
 use crate::md;
 use crate::models::{
-    relative_time, rollup, Attachment, Feedback, FeedbackTarget, Result as TestResult, Review, Run,
-    RunNote, RunStep, RunTest,
+    relative_time, rollup, Attachment, Feedback, FeedbackTarget, PlanItem, Result as TestResult,
+    Review, Run, RunNote, RunStep, RunTest,
 };
 use crate::storage;
 use crate::AppState;
@@ -251,6 +251,14 @@ struct ReviewRow {
     relative_created: String,
 }
 
+struct PlanRow {
+    item: PlanItem,
+    body_html: String,
+    /// Verdict from a matched run_test, by `item.name`. `None` means the
+    /// QA agent hasn't reported on this plan item yet — renders as "pending".
+    verdict: Option<TestResult>,
+}
+
 #[derive(Template)]
 #[template(path = "run.html")]
 struct RunTpl {
@@ -261,6 +269,7 @@ struct RunTpl {
     tests: Vec<TestRow>,
     notes: Vec<NoteRow>,
     reviews: Vec<ReviewRow>,
+    plan: Vec<PlanRow>,
     counts: ResultCounts,
     rollup: Option<TestResult>,
     other_runs: Vec<Run>,
@@ -280,6 +289,7 @@ struct RunBodyTpl {
     tests: Vec<TestRow>,
     notes: Vec<NoteRow>,
     reviews: Vec<ReviewRow>,
+    plan: Vec<PlanRow>,
     counts: ResultCounts,
     rollup: Option<TestResult>,
     findings: i64,
@@ -429,6 +439,7 @@ async fn run_page(
         pr_summary_md: body.pr_summary_md,
         pr_summary_html: body.pr_summary_html,
         reviews: body.reviews,
+        plan: body.plan,
     }))
 }
 
@@ -572,6 +583,28 @@ async fn build_run_body(state: &AppState, id: i64) -> Result<RunBodyTpl, AppErro
         })
         .collect();
 
+    // Plan items, with verdict pulled from any run_test sharing the item's
+    // name. `tests_out` is already built so the lookup is cheap.
+    let plan_items = db.plan_items_for_run(id)?;
+    let plan: Vec<PlanRow> = plan_items
+        .into_iter()
+        .map(|item| {
+            let verdict = tests_out
+                .iter()
+                .find(|t| t.test.name == item.name)
+                .and_then(|t| t.rollup);
+            PlanRow {
+                body_html: if item.body.is_empty() {
+                    String::new()
+                } else {
+                    md::to_html(&item.body)
+                },
+                verdict,
+                item,
+            }
+        })
+        .collect();
+
     let pr_summary_md = render_pr_summary(&run, run_rollup, &counts, &notes, &tests_out, &reviews);
     let pr_summary_html = md::to_html(&pr_summary_md);
 
@@ -595,6 +628,7 @@ async fn build_run_body(state: &AppState, id: i64) -> Result<RunBodyTpl, AppErro
         pr_summary_md,
         pr_summary_html,
         reviews,
+        plan,
     })
 }
 

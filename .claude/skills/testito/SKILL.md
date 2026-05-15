@@ -74,12 +74,62 @@ Only after you've answered all seven and filed every "yes" should you run `testi
 
 ## The mental model
 
-Three nouns:
+Four nouns:
 - **Run** — one testing session. Identified by a name like `auth-smoke-2026-04-28`. Use a stable, descriptive name; same name = same run (resumable across messages).
-- **Test** — a logical grouping of steps within a run. Phrase it as the user-facing scenario: `"check login flow with correct credentials"`, not `"login_test_1"`.
+- **Plan item** *(optional)* — a test case authored before execution. Used when a coding agent hands a QA agent a list of things to test. Each item has a 1-indexed `ordinal`, a name, and a markdown body with steps + pass criteria. See "Authoring and picking up a plan" below.
+- **Test** — a logical grouping of steps within a run. Phrase it as the user-facing scenario: `"check login flow with correct credentials"`, not `"login_test_1"`. When you're executing a plan item, the test name **is** the plan item's name (use `report --plan N` to wire them up).
 - **Step** — one concrete action or verification you perform. One step per `testito report` call. Examples: `"input email and password and click Sign in"`, `"dashboard loads within 2 seconds"`.
 
 Steps are **append-only**. If you retry a step, log it again with `--attempt 2`. The log shows what actually happened, in order.
+
+## Authoring and picking up a plan (cross-agent handoff)
+
+Two-agent flow: a **coding agent** authors a plan describing what to verify on the branch/PR it's working on, and a **QA agent** picks it up later and reports results back. Both agents auto-discover the same run from `git branch` / `gh pr view`, so neither needs to know the run name.
+
+### Coding agent (author)
+
+After implementing a feature, file a plan for the QA agent. The plan lives on the run associated with the current branch/PR — auto-created on first write.
+
+```bash
+# One-by-one (returns the assigned ordinal: "plan #1 ...")
+testito plan add --name "Test 1 — Migration applied + schema matches design" \
+  --body "$(cat <<'EOF'
+Run psql to verify the new columns:
+  docker exec supabase_db_x psql -c "\d public.pending_replies"
+
+**Pass criteria**: pending_replies.conversation_id is uuid PK,
+last_message_id NOT NULL, etc.
+EOF
+)"
+
+# Or bulk-import a single markdown plan file split on `## Test N — title`
+# headers (also accepts `### Test N`, `## Test N:`). Anything before the
+# first header is dropped.
+testito plan import --file qa-plan.md
+testito plan import --file qa-plan.md --replace   # wipe existing items first
+```
+
+`--name` is what the QA agent will see as the test scenario (and what `report --plan N` will use for the `--test` field). `--body` is the full markdown — commands, expected output, pass criteria, hard-fail conditions. Be exhaustive; the QA agent only sees what you write.
+
+### QA agent (executor)
+
+Pick up the plan, execute each item, and report results linked back to the plan item. Run is auto-discovered from current branch/PR.
+
+```bash
+testito plan list                    # human-readable: ordinal, verdict, name, preview
+testito plan list --json             # machine-readable: ordinal, name, body, verdict, created_at
+testito plan show --plan 3           # full markdown body of plan item #3
+
+# Report results — pass --plan N instead of --test "...":
+testito report --plan 1 --step "verify pending_replies columns" --result pass
+testito report --plan 1 --step "verify idx_messages_reply_dedup unique"  --result pass
+testito report --plan 3 --step "duplicate INSERT errors with 23505" --result fail \
+  --note "Duplicate INSERT succeeded — constraint not enforced."
+```
+
+`report --plan N` looks up the plan item, names the run_test row after it, and appends the step. Verdict per plan item rolls up the same way regular tests do (any fail → fail, any warning → warning, etc.). On the dashboard, the Plan section shows each item with its rolled-up verdict — items you haven't reported on yet stay `pending`.
+
+Don't pass both `--plan N` and `--test "..."` — the CLI warns and uses `--test` if you do. Pick one per call.
 
 ## CLI commands
 
@@ -87,10 +137,13 @@ Steps are **append-only**. If you retry a step, log it again with `--attempt 2`.
 testito start --run "<name>" [--description "..."] [METADATA…]
     Optional. Auto-created on first `report` if you skip this.
 
-testito report --run "<name>" --test "<scenario>" --step "<action>"
+testito report --run "<name>" (--test "<scenario>" | --plan N) --step "<action>"
               --result <pass|fail|warning|skipped> [--attempt N] [--note "..."]
               [--screenshot PATH ...] [METADATA…]
     The main verb. Call this once per step as you go.
+    --plan N links the step to a plan item authored earlier with
+    `plan add`/`plan import`; --test is auto-filled from the plan item's
+    name. Pass --plan OR --test, not both.
     --screenshot is repeatable; each file is copied into testito's storage
     and rendered as an inline thumbnail under the step's note.
 
@@ -129,6 +182,16 @@ testito review --run "<name>" --kind <security|code|perf|other>
     File a one-shot assessment (security review, code review, perf review)
     on a run. Use this from `/security-review` / `/review` agents instead
     of dumping the verdict in chat.
+
+testito plan add --name "<scenario>" (--body "..." | --body-file PATH)
+                [--run "<name>"] [METADATA…]
+testito plan import --file qa-plan.md [--replace] [--run "<name>"]
+testito plan list  [--run "<name>" | --branch X | --pr N] [--json]
+testito plan show  --plan N [--run "<name>" | --branch X | --pr N]
+    Author or pick up a per-run test plan. See "Authoring and picking up a
+    plan" above for the cross-agent handoff. Run auto-discovers from the
+    current branch/PR when --run is omitted. `plan add` returns the
+    assigned ordinal; the QA agent passes that to `report --plan N`.
 
 testito triage --run "<name>" [--json] [--no-mark-seen] [--all]
     Actionable subset of a run for the coding agent: failed/warning steps,

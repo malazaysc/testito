@@ -4,7 +4,7 @@ use anyhow::Result;
 use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::models::{
-    Attachment, AttachmentTarget, Feedback, FeedbackAuthor, FeedbackTarget, Kind,
+    Attachment, AttachmentTarget, Feedback, FeedbackAuthor, FeedbackTarget, Kind, PlanItem,
     Result as TestResult, Review, ReviewKind, ReviewVerdict, Run, RunMeta, RunNote, RunStep,
     RunTest, Scope,
 };
@@ -163,6 +163,22 @@ CREATE TABLE IF NOT EXISTS reviews (
 );
 
 CREATE INDEX IF NOT EXISTS idx_reviews_run ON reviews(run_id);
+
+-- A coding agent files a plan; a separate testing agent picks it up and
+-- executes. Each plan item is one "test case" within a run. Ordinal is the
+-- 1-indexed handle the QA agent passes to `report --plan N` and the human
+-- reads on the dashboard.
+CREATE TABLE IF NOT EXISTS plan_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id INTEGER NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    ordinal INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    body TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    UNIQUE(run_id, ordinal)
+);
+
+CREATE INDEX IF NOT EXISTS idx_plan_items_run ON plan_items(run_id);
 "#;
 
 const DROP_LEGACY: &str = r#"
@@ -623,6 +639,75 @@ impl Db {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    /// Append a plan item, auto-assigning the next ordinal for this run.
+    /// Returns `(id, ordinal)` so the caller can echo the handle the QA
+    /// agent will pass to `--plan N`.
+    pub fn append_plan_item(&self, run_id: i64, name: &str, body: &str) -> Result<(i64, i64)> {
+        let next: i64 = self.conn.query_row(
+            "SELECT COALESCE(MAX(ordinal), 0) + 1 FROM plan_items WHERE run_id = ?1",
+            params![run_id],
+            |r| r.get(0),
+        )?;
+        let now = chrono::Utc::now().to_rfc3339();
+        self.conn.execute(
+            "INSERT INTO plan_items(run_id, ordinal, name, body, created_at)
+             VALUES(?1, ?2, ?3, ?4, ?5)",
+            params![run_id, next, name, body, now],
+        )?;
+        Ok((self.conn.last_insert_rowid(), next))
+    }
+
+    /// Wipe a run's plan items. Used by `plan import --replace` so the
+    /// coding agent can revise the plan in place without leaving stale
+    /// ordinals behind.
+    pub fn clear_plan_items(&self, run_id: i64) -> Result<usize> {
+        let n = self
+            .conn
+            .execute("DELETE FROM plan_items WHERE run_id = ?1", params![run_id])?;
+        Ok(n)
+    }
+
+    pub fn plan_items_for_run(&self, run_id: i64) -> Result<Vec<PlanItem>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, run_id, ordinal, name, body, created_at FROM plan_items
+             WHERE run_id = ?1 ORDER BY ordinal",
+        )?;
+        let rows = stmt
+            .query_map(params![run_id], |r| {
+                Ok(PlanItem {
+                    id: r.get(0)?,
+                    run_id: r.get(1)?,
+                    ordinal: r.get(2)?,
+                    name: r.get(3)?,
+                    body: r.get(4)?,
+                    created_at: r.get(5)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    pub fn plan_item_by_ordinal(&self, run_id: i64, ordinal: i64) -> Result<Option<PlanItem>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT id, run_id, ordinal, name, body, created_at FROM plan_items
+                 WHERE run_id = ?1 AND ordinal = ?2",
+                params![run_id, ordinal],
+                |r| {
+                    Ok(PlanItem {
+                        id: r.get(0)?,
+                        run_id: r.get(1)?,
+                        ordinal: r.get(2)?,
+                        name: r.get(3)?,
+                        body: r.get(4)?,
+                        created_at: r.get(5)?,
+                    })
+                },
+            )
+            .optional()?)
+    }
+
     pub fn insert_attachment(
         &self,
         target_kind: AttachmentTarget,
@@ -1024,6 +1109,60 @@ mod tests {
             "legacy files table should be dropped"
         );
         assert!(names.iter().any(|n| n == "runs"));
+    }
+
+    #[test]
+    fn plan_items_assign_sequential_ordinals_per_run() {
+        let (_dir, db) = open_temp();
+        let r1 = db.ensure_run("r1", &RunMeta::default()).unwrap();
+        let r2 = db.ensure_run("r2", &RunMeta::default()).unwrap();
+        let (_, o1) = db.append_plan_item(r1, "Test 1 — a", "body a").unwrap();
+        let (_, o2) = db.append_plan_item(r1, "Test 2 — b", "body b").unwrap();
+        let (_, o3) = db.append_plan_item(r2, "Test 1 — c", "body c").unwrap();
+        assert_eq!(o1, 1);
+        assert_eq!(o2, 2);
+        assert_eq!(
+            o3, 1,
+            "ordinals reset per run, so each run is 1-indexed independently"
+        );
+
+        let r1_items = db.plan_items_for_run(r1).unwrap();
+        assert_eq!(r1_items.len(), 2);
+        assert_eq!(r1_items[0].ordinal, 1);
+        assert_eq!(r1_items[0].name, "Test 1 — a");
+        assert_eq!(r1_items[1].ordinal, 2);
+    }
+
+    #[test]
+    fn plan_item_by_ordinal_lookup() {
+        let (_dir, db) = open_temp();
+        let r = db.ensure_run("r", &RunMeta::default()).unwrap();
+        db.append_plan_item(r, "Test 1 — first", "body").unwrap();
+        db.append_plan_item(r, "Test 2 — second", "body").unwrap();
+        let p = db.plan_item_by_ordinal(r, 2).unwrap().unwrap();
+        assert_eq!(p.name, "Test 2 — second");
+        assert!(db.plan_item_by_ordinal(r, 99).unwrap().is_none());
+    }
+
+    #[test]
+    fn clear_plan_items_wipes_only_target_run() {
+        let (_dir, db) = open_temp();
+        let r1 = db.ensure_run("r1", &RunMeta::default()).unwrap();
+        let r2 = db.ensure_run("r2", &RunMeta::default()).unwrap();
+        db.append_plan_item(r1, "a", "").unwrap();
+        db.append_plan_item(r1, "b", "").unwrap();
+        db.append_plan_item(r2, "c", "").unwrap();
+        let n = db.clear_plan_items(r1).unwrap();
+        assert_eq!(n, 2);
+        assert!(db.plan_items_for_run(r1).unwrap().is_empty());
+        assert_eq!(
+            db.plan_items_for_run(r2).unwrap().len(),
+            1,
+            "clearing r1's plan items must not touch r2"
+        );
+        // After clear, next append starts from 1 again.
+        let (_, o) = db.append_plan_item(r1, "fresh", "").unwrap();
+        assert_eq!(o, 1);
     }
 
     #[test]

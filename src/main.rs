@@ -80,6 +80,31 @@ enum Cmd {
     /// pill, and DOES NOT show up in `triage`'s findings list — exactly
     /// what `testito jot` would have done wrong.
     Reply(ReplyArgs),
+
+    /// Author or read a test plan for a run. A coding agent files plan
+    /// items with `plan add` / `plan import`; the testing agent picks
+    /// them up with `plan list` / `plan show` and reports results with
+    /// `report --plan N`. Run is auto-discovered from branch/PR.
+    #[command(subcommand)]
+    Plan(PlanCmd),
+}
+
+#[derive(Subcommand, Debug)]
+enum PlanCmd {
+    /// Append one plan item to a run. Returns the assigned ordinal.
+    Add(PlanAddArgs),
+
+    /// Bulk-import a plan from a markdown file. Splits on `## Test N`
+    /// (or `### Test N`) headers — anything before the first marker is
+    /// dropped. Use `--replace` to wipe existing items first.
+    Import(PlanImportArgs),
+
+    /// List a run's plan items with their verdict from any matching
+    /// run_tests by name.
+    List(PlanListArgs),
+
+    /// Print one plan item's full body to stdout.
+    Show(PlanShowArgs),
 }
 
 #[derive(Args, Debug, Default)]
@@ -192,9 +217,17 @@ struct ReportArgs {
     #[arg(long)]
     run: String,
 
-    /// Test name (a logical group of steps).
+    /// Plan ordinal this step belongs to. When set, `--test` is auto-filled
+    /// from the plan item's name so a re-read of the plan item and the run
+    /// row stay in sync. Mutually exclusive with passing both `--plan` and
+    /// `--test`.
+    #[arg(long = "plan")]
+    plan: Option<i64>,
+
+    /// Test name (a logical group of steps). Optional when `--plan` is set
+    /// (the plan item's name is used).
     #[arg(long)]
-    test: String,
+    test: Option<String>,
 
     /// One step within the test (a single concrete action or verification).
     #[arg(long)]
@@ -367,6 +400,109 @@ struct ReplyArgs {
 }
 
 #[derive(Args, Debug)]
+struct PlanAddArgs {
+    /// Run name or numeric id. Optional — if omitted, auto-discovers from
+    /// the current branch + `gh pr view`, or from `--branch` / `--pr` on
+    /// the metadata block below. Run is auto-created when `--run` is
+    /// passed (same semantics as `report`).
+    #[arg(long)]
+    run: Option<String>,
+
+    /// Short scenario name. Mirrors the `--test "..."` the testing agent
+    /// will see (and what `report --plan N` will name the run_test row).
+    #[arg(long)]
+    name: String,
+
+    /// Body of the plan item. Markdown is supported. Mutually exclusive
+    /// with `--body-file`.
+    #[arg(long)]
+    body: Option<String>,
+
+    /// Read the body from this path (e.g. `step3.md`).
+    #[arg(long = "body-file")]
+    body_file: Option<PathBuf>,
+
+    #[command(flatten)]
+    meta: MetaArgs,
+
+    /// SQLite database file (default: platform data dir).
+    #[arg(long)]
+    db: Option<PathBuf>,
+}
+
+#[derive(Args, Debug)]
+struct PlanImportArgs {
+    /// Run name or numeric id. Optional — auto-discovers from branch/PR
+    /// on the metadata block below (or current git working tree).
+    #[arg(long)]
+    run: Option<String>,
+
+    /// Markdown file to import. Splits on `## Test N — title` headers
+    /// (also accepts `### Test N`, `## Test N:`, `## Test N`). Each section
+    /// becomes a plan item in document order.
+    #[arg(long)]
+    file: PathBuf,
+
+    /// Wipe any existing plan items on this run before importing. Without
+    /// this flag, import errors if the run already has plan items.
+    #[arg(long)]
+    replace: bool,
+
+    #[command(flatten)]
+    meta: MetaArgs,
+
+    /// SQLite database file (default: platform data dir).
+    #[arg(long)]
+    db: Option<PathBuf>,
+}
+
+#[derive(Args, Debug)]
+struct PlanListArgs {
+    /// Run name or numeric id. Optional — auto-discovers from branch/PR.
+    #[arg(long)]
+    run: Option<String>,
+
+    /// Filter discovery to this branch.
+    #[arg(long)]
+    branch: Option<String>,
+
+    /// Filter discovery to this GitHub PR number.
+    #[arg(long)]
+    pr: Option<i64>,
+
+    /// Print as JSON instead of human-readable.
+    #[arg(long)]
+    json: bool,
+
+    /// SQLite database file (default: platform data dir).
+    #[arg(long)]
+    db: Option<PathBuf>,
+}
+
+#[derive(Args, Debug)]
+struct PlanShowArgs {
+    /// Run name or numeric id. Optional — auto-discovers from branch/PR.
+    #[arg(long)]
+    run: Option<String>,
+
+    /// Filter discovery to this branch.
+    #[arg(long)]
+    branch: Option<String>,
+
+    /// Filter discovery to this GitHub PR number.
+    #[arg(long)]
+    pr: Option<i64>,
+
+    /// Ordinal of the plan item to print (1-indexed, as returned by `plan list`).
+    #[arg(long = "plan")]
+    ordinal: i64,
+
+    /// SQLite database file (default: platform data dir).
+    #[arg(long)]
+    db: Option<PathBuf>,
+}
+
+#[derive(Args, Debug)]
 struct ReviewArgs {
     /// Run name (auto-creates the run if it doesn't exist, picking up
     /// branch/commit/PR from auto-detect — same as `report`).
@@ -524,6 +660,24 @@ async fn main() -> Result<()> {
             let db_path = resolve_db(a.db.clone())?;
             cmd_reply(db_path, a)
         }
+        Cmd::Plan(sub) => match sub {
+            PlanCmd::Add(a) => {
+                let db_path = resolve_db(a.db.clone())?;
+                cmd_plan_add(db_path, a)
+            }
+            PlanCmd::Import(a) => {
+                let db_path = resolve_db(a.db.clone())?;
+                cmd_plan_import(db_path, a)
+            }
+            PlanCmd::List(a) => {
+                let db_path = resolve_db(a.db.clone())?;
+                cmd_plan_list(db_path, a)
+            }
+            PlanCmd::Show(a) => {
+                let db_path = resolve_db(a.db.clone())?;
+                cmd_plan_show(db_path, a)
+            }
+        },
     }
 }
 
@@ -649,11 +803,41 @@ fn cmd_report(db_path: PathBuf, a: ReportArgs) -> Result<()> {
     let result = TestResult::parse(&a.result)?;
     let db = Db::open(&db_path)?;
     let run_name = a.run.clone();
-    let test_name = a.test.clone();
     let step_name = a.step.clone();
     let attempt = a.attempt;
     let meta = a.meta.into_meta(None);
     let run_id = db.ensure_run(&run_name, &meta)?;
+    // Resolve the test name from `--plan N` (plan item lookup), falling
+    // back to the explicit `--test`. Passing both: --test wins, but warn so
+    // the agent learns to drop one.
+    let test_name = match (a.plan, a.test.as_deref()) {
+        (Some(ord), None) => {
+            let item = db.plan_item_by_ordinal(run_id, ord)?.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "no plan item #{ord} on run '{run_name}' (list with `testito plan list`)"
+                )
+            })?;
+            item.name
+        }
+        (Some(ord), Some(t)) => {
+            let item = db.plan_item_by_ordinal(run_id, ord)?.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "no plan item #{ord} on run '{run_name}' (list with `testito plan list`)"
+                )
+            })?;
+            if item.name != t {
+                eprintln!(
+                    "⚠  --test \"{t}\" overrides plan #{ord} name \"{}\" — pass only one of --plan / --test",
+                    item.name
+                );
+            }
+            t.to_string()
+        }
+        (None, Some(t)) => t.to_string(),
+        (None, None) => {
+            anyhow::bail!("--test is required (or pass --plan N to use a plan item's name)")
+        }
+    };
     let test_id = db.ensure_test(run_id, &test_name)?;
     let step_id = db.append_step(
         test_id,
@@ -1598,10 +1782,307 @@ fn cmd_show(db_path: PathBuf, a: ShowArgs) -> Result<()> {
     Ok(())
 }
 
+fn cmd_plan_add(db_path: PathBuf, a: PlanAddArgs) -> Result<()> {
+    if a.body.is_some() && a.body_file.is_some() {
+        anyhow::bail!("pass either --body or --body-file, not both");
+    }
+    let body = match (a.body, a.body_file) {
+        (Some(b), _) => b,
+        (None, Some(p)) => std::fs::read_to_string(&p)
+            .map_err(|e| anyhow::anyhow!("read --body-file {}: {}", p.display(), e))?,
+        (None, None) => String::new(),
+    };
+    let db = Db::open(&db_path)?;
+    // Same auto-create-on-write semantics as `report`/`note`/`jot`. When the
+    // caller passes --run we use ensure_run; otherwise we discover from
+    // branch/PR (filled in from auto-detect or the metadata flags).
+    let run_id = if let Some(run) = a.run.as_deref() {
+        let meta = a.meta.into_meta(None);
+        db.ensure_run(run, &meta)?
+    } else {
+        let branch = a.meta.branch.clone();
+        let pr = a.meta.pr;
+        let run = resolve_run(&db, None, branch.as_deref(), pr)?;
+        run.id
+    };
+    let (id, ordinal) = db.append_plan_item(run_id, &a.name, &body)?;
+    println!("plan #{ordinal} (id {id}) on run_id {run_id}: {}", a.name);
+    Ok(())
+}
+
+fn cmd_plan_import(db_path: PathBuf, a: PlanImportArgs) -> Result<()> {
+    let src = std::fs::read_to_string(&a.file)
+        .map_err(|e| anyhow::anyhow!("read {}: {}", a.file.display(), e))?;
+    let items = parse_plan_markdown(&src);
+    if items.is_empty() {
+        anyhow::bail!(
+            "no `## Test N` / `### Test N` sections found in {} — nothing to import",
+            a.file.display()
+        );
+    }
+    let db = Db::open(&db_path)?;
+    let run_id = if let Some(run) = a.run.as_deref() {
+        let meta = a.meta.into_meta(None);
+        db.ensure_run(run, &meta)?
+    } else {
+        let branch = a.meta.branch.clone();
+        let pr = a.meta.pr;
+        let run = resolve_run(&db, None, branch.as_deref(), pr)?;
+        run.id
+    };
+    let existing = db.plan_items_for_run(run_id)?;
+    if !existing.is_empty() {
+        if a.replace {
+            let n = db.clear_plan_items(run_id)?;
+            eprintln!("cleared {n} existing plan item{}", plural(n as i64));
+        } else {
+            anyhow::bail!(
+                "run already has {} plan item{} — pass --replace to wipe them first",
+                existing.len(),
+                plural(existing.len() as i64)
+            );
+        }
+    }
+    for (name, body) in &items {
+        db.append_plan_item(run_id, name, body)?;
+    }
+    println!(
+        "imported {} plan item{} into run_id {run_id}",
+        items.len(),
+        plural(items.len() as i64)
+    );
+    Ok(())
+}
+
+fn cmd_plan_list(db_path: PathBuf, a: PlanListArgs) -> Result<()> {
+    let db = Db::open(&db_path)?;
+    let run = resolve_run(&db, a.run.as_deref(), a.branch.as_deref(), a.pr)?;
+    let items = db.plan_items_for_run(run.id)?;
+    let tests = db.run_tests(run.id)?;
+    // Compute verdict per test name from rollup(steps). Plan items match
+    // run_tests on `name`; unmatched plan items render as `pending`.
+    let mut verdict_by_name: std::collections::HashMap<String, Option<TestResult>> =
+        std::collections::HashMap::new();
+    for t in &tests {
+        let steps = db.steps_for_test(t.id)?;
+        verdict_by_name.insert(t.name.clone(), rollup(&steps));
+    }
+
+    if a.json {
+        let payload = serde_json::json!({
+            "run": run.name,
+            "run_id": run.id,
+            "items": items.iter().map(|p| {
+                let verdict = verdict_by_name.get(&p.name).copied().flatten();
+                serde_json::json!({
+                    "ordinal": p.ordinal,
+                    "name": p.name,
+                    "body": p.body,
+                    "verdict": verdict.map(|v| v.as_str()).unwrap_or("pending"),
+                    "created_at": p.created_at,
+                })
+            }).collect::<Vec<_>>(),
+        });
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+        return Ok(());
+    }
+
+    if items.is_empty() {
+        println!("(no plan items on '{}')", run.name);
+        return Ok(());
+    }
+    println!("Plan for '{}' ({} items):", run.name, items.len());
+    for p in &items {
+        let verdict = verdict_by_name
+            .get(&p.name)
+            .copied()
+            .flatten()
+            .map(|v| v.as_str())
+            .unwrap_or("pending");
+        let preview = first_line(&p.body);
+        let preview_suffix = if preview.is_empty() {
+            String::new()
+        } else {
+            format!("\n      {preview}")
+        };
+        println!("  #{} [{verdict}] {}{preview_suffix}", p.ordinal, p.name);
+    }
+    Ok(())
+}
+
+fn cmd_plan_show(db_path: PathBuf, a: PlanShowArgs) -> Result<()> {
+    let db = Db::open(&db_path)?;
+    let run = resolve_run(&db, a.run.as_deref(), a.branch.as_deref(), a.pr)?;
+    let item = db
+        .plan_item_by_ordinal(run.id, a.ordinal)?
+        .ok_or_else(|| anyhow::anyhow!("no plan item #{} on run '{}'", a.ordinal, run.name))?;
+    println!("# Plan #{} — {}\n", item.ordinal, item.name);
+    if item.body.is_empty() {
+        println!("(empty body)");
+    } else {
+        println!("{}", item.body);
+    }
+    Ok(())
+}
+
+/// Split a markdown QA plan into `(name, body)` plan items. Accepts header
+/// markers like `## Test 1 — title`, `### Test 2: title`, `## Test 3 title`
+/// (case-insensitive on "Test"). Everything before the first marker is
+/// dropped — the prelude lives in commit messages and the run description,
+/// not in plan_items.
+fn parse_plan_markdown(src: &str) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    let mut cur_name: Option<String> = None;
+    let mut cur_body = String::new();
+    for line in src.lines() {
+        if let Some(name) = parse_plan_header(line) {
+            if let Some(prev) = cur_name.take() {
+                out.push((prev, std::mem::take(&mut cur_body).trim().to_string()));
+            }
+            cur_name = Some(name);
+            continue;
+        }
+        if cur_name.is_some() {
+            cur_body.push_str(line);
+            cur_body.push('\n');
+        }
+    }
+    if let Some(prev) = cur_name {
+        out.push((prev, cur_body.trim().to_string()));
+    }
+    out
+}
+
+/// Match `^#{2,4}\s+Test\s+\d+\s*(?:[—:\-]\s*)?(.*)$` and return the title
+/// (everything after `Test N` plus the optional separator). Bare `## Test 3`
+/// returns an empty title; the caller can fall back to "Test 3".
+fn parse_plan_header(line: &str) -> Option<String> {
+    let line = line.trim_end();
+    let rest = line
+        .strip_prefix("####")
+        .or_else(|| line.strip_prefix("###"))
+        .or_else(|| line.strip_prefix("##"))?;
+    let rest = rest.trim_start();
+    let lc = rest.to_ascii_lowercase();
+    let after_test = lc.strip_prefix("test ")?;
+    // Advance past the digits.
+    let digit_end = after_test
+        .bytes()
+        .take_while(|b| b.is_ascii_digit())
+        .count();
+    if digit_end == 0 {
+        return None;
+    }
+    let num_str = &after_test[..digit_end];
+    let after_num = rest[5 + digit_end..].trim_start();
+    // Strip a leading separator (—, :, -) if present.
+    let title = after_num
+        .strip_prefix('—')
+        .or_else(|| after_num.strip_prefix("--"))
+        .or_else(|| after_num.strip_prefix(':'))
+        .or_else(|| after_num.strip_prefix('-'))
+        .unwrap_or(after_num)
+        .trim();
+    if title.is_empty() {
+        Some(format!("Test {num_str}"))
+    } else {
+        Some(format!("Test {num_str} — {title}"))
+    }
+}
+
 fn default_db_path() -> PathBuf {
     if let Some(dirs) = directories::ProjectDirs::from("dev", "testito", "testito") {
         dirs.data_dir().join("testito.db")
     } else {
         PathBuf::from("testito.db")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_plan_header, parse_plan_markdown};
+
+    #[test]
+    fn plan_header_accepts_em_dash() {
+        assert_eq!(
+            parse_plan_header("## Test 1 — Migration applied + schema matches").as_deref(),
+            Some("Test 1 — Migration applied + schema matches"),
+        );
+    }
+
+    #[test]
+    fn plan_header_accepts_colon_and_double_hyphen() {
+        assert_eq!(
+            parse_plan_header("### Test 2: RPC behavior").as_deref(),
+            Some("Test 2 — RPC behavior"),
+        );
+        assert_eq!(
+            parse_plan_header("## Test 3 -- Reply dedup").as_deref(),
+            Some("Test 3 — Reply dedup"),
+        );
+    }
+
+    #[test]
+    fn plan_header_bare_returns_just_test_n() {
+        assert_eq!(parse_plan_header("## Test 4").as_deref(), Some("Test 4"));
+    }
+
+    #[test]
+    fn plan_header_rejects_non_test_headings() {
+        assert!(parse_plan_header("## Prerequisites").is_none());
+        assert!(parse_plan_header("# Test 1").is_none()); // single-hash not allowed
+        assert!(parse_plan_header("not a heading").is_none());
+        assert!(parse_plan_header("## Test").is_none()); // missing number
+    }
+
+    #[test]
+    fn parse_plan_markdown_drops_prelude_and_splits_on_test_headers() {
+        let src = "\
+# QA Plan
+**Scope**: foundation migration
+
+## Prerequisites
+some setup
+
+## Test 1 — Schema check
+verify columns
+
+## Test 2 — RPC behavior
+run vitest
+";
+        let items = parse_plan_markdown(src);
+        assert_eq!(items.len(), 2, "got: {items:?}");
+        assert_eq!(items[0].0, "Test 1 — Schema check");
+        assert!(items[0].1.contains("verify columns"));
+        assert!(
+            !items[0].1.contains("Prerequisites"),
+            "prelude should not leak into first plan item"
+        );
+        assert_eq!(items[1].0, "Test 2 — RPC behavior");
+        assert!(items[1].1.contains("run vitest"));
+    }
+
+    #[test]
+    fn parse_plan_markdown_handles_empty_input() {
+        assert!(parse_plan_markdown("").is_empty());
+        assert!(parse_plan_markdown("just some prelude, no headers").is_empty());
+    }
+
+    #[test]
+    fn parse_plan_markdown_preserves_body_markdown() {
+        let src = "\
+## Test 1 — Body has markdown
+Run this:
+
+```bash
+psql -c \"\\d public.pending_replies\"
+```
+
+Pass criteria: column exists.
+";
+        let items = parse_plan_markdown(src);
+        assert_eq!(items.len(), 1);
+        assert!(items[0].1.contains("```bash"));
+        assert!(items[0].1.contains("Pass criteria"));
     }
 }
