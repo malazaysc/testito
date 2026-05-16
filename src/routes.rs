@@ -253,10 +253,16 @@ struct ReviewRow {
 
 struct PlanRow {
     item: PlanItem,
-    body_html: String,
     /// Verdict from a matched run_test, by `item.name`. `None` means the
     /// QA agent hasn't reported on this plan item yet — renders as "pending".
     verdict: Option<TestResult>,
+    /// `run_test.id` of the matched test card below, used as the anchor
+    /// target. `None` when no report has landed for this plan item yet.
+    test_id: Option<i64>,
+    /// One-line preview of the first failing/warning step (latest attempt)
+    /// — the "why" of a non-pass verdict, so a reviewer doesn't have to
+    /// scroll into the Tests section. `None` unless verdict is fail/warning.
+    failure_preview: Option<String>,
 }
 
 #[derive(Template)]
@@ -583,24 +589,24 @@ async fn build_run_body(state: &AppState, id: i64) -> Result<RunBodyTpl, AppErro
         })
         .collect();
 
-    // Plan items, with verdict pulled from any run_test sharing the item's
-    // name. `tests_out` is already built so the lookup is cheap.
+    // Plan items, with verdict + failure preview pulled from the matched
+    // run_test (by name). `tests_out` is already built so this is O(plan ×
+    // tests) which is trivial in practice. The plan body itself is NOT
+    // rendered here — the dashboard's job is to show *state*; the body
+    // lives in the source file and in `testito plan show`.
     let plan_items = db.plan_items_for_run(id)?;
     let plan: Vec<PlanRow> = plan_items
         .into_iter()
         .map(|item| {
-            let verdict = tests_out
-                .iter()
-                .find(|t| t.test.name == item.name)
-                .and_then(|t| t.rollup);
+            let matched = tests_out.iter().find(|t| t.test.name == item.name);
+            let verdict = matched.and_then(|t| t.rollup);
+            let test_id = matched.map(|t| t.test.id);
+            let failure_preview = matched.and_then(|t| failure_preview(&t.steps));
             PlanRow {
-                body_html: if item.body.is_empty() {
-                    String::new()
-                } else {
-                    md::to_html(&item.body)
-                },
-                verdict,
                 item,
+                verdict,
+                test_id,
+                failure_preview,
             }
         })
         .collect();
@@ -650,6 +656,44 @@ async fn export_markdown(
         ),
     ];
     Ok((headers, md))
+}
+
+/// One-line "why this is red" preview for a plan row. Walks the latest
+/// attempt per step name, returns the first failing one (then warning),
+/// formatted as `step_name: first_note_line`. `None` if every latest-attempt
+/// step is pass/skipped — there's nothing useful to surface.
+fn failure_preview(steps: &[StepRow]) -> Option<String> {
+    use std::collections::BTreeMap;
+    let mut latest: BTreeMap<&str, &StepRow> = BTreeMap::new();
+    for s in steps {
+        match latest.get(s.step.name.as_str()) {
+            Some(prev) if prev.step.attempt >= s.step.attempt => {}
+            _ => {
+                latest.insert(&s.step.name, s);
+            }
+        }
+    }
+    let mut chronological: Vec<&&StepRow> = latest.values().collect();
+    chronological.sort_by(|a, b| a.step.reported_at.cmp(&b.step.reported_at));
+    let format = |s: &StepRow| -> String {
+        let first_note = s.step.note.lines().next().unwrap_or("").trim();
+        if first_note.is_empty() {
+            s.step.name.clone()
+        } else {
+            format!("{}: {}", s.step.name, first_note)
+        }
+    };
+    for s in &chronological {
+        if matches!(s.step.result, TestResult::Fail) {
+            return Some(format(s));
+        }
+    }
+    for s in &chronological {
+        if matches!(s.step.result, TestResult::Warning) {
+            return Some(format(s));
+        }
+    }
+    None
 }
 
 /// A tight one-block summary suitable for pasting into a PR description or

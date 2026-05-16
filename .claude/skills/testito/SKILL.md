@@ -131,6 +131,39 @@ testito report --plan 3 --step "duplicate INSERT errors with 23505" --result fai
 
 Don't pass both `--plan N` and `--test "..."` — the CLI warns and uses `--test` if you do. Pick one per call.
 
+## Iterative QA across sessions (fix-and-verify loop)
+
+The realistic flow is **not** one-shot: QA agent runs, finds bugs, files findings; coding agent fixes; you (or another QA agent, possibly the next day) come back to verify the fixes. **Re-use the original run name** for every pass — same name = same run, even across sessions, even after `testito end`. Spawning a new `-pass2` / `-retest` / `-v2` run on each iteration is the most common mistake and fragments the history across rows the human has to mentally re-join.
+
+What "reusing the run" looks like in practice:
+
+```bash
+# Day 1 — pass 1
+testito report --plan 3 --step "duplicate INSERT errors with 23505" --result fail \
+  --note "Constraint not enforced — second INSERT succeeded."
+testito end --run "$RUN"            # ← does NOT lock the run, just sets completed_at
+
+# Day 2 — coding agent has pushed a fix. Pass 2.
+testito triage                      # auto-discovers the run, shows what's still failing
+testito plan list                   # see which plan items are still red
+
+# Re-run the failing step with --attempt 2 (or 3, 4…). Same --run, same --plan,
+# same --step name. Rollup uses the latest attempt per step, so a fix flips the
+# verdict from fail → pass cleanly.
+testito report --plan 3 --step "duplicate INSERT errors with 23505" \
+  --attempt 2 --result pass --note "Fixed in <sha>: unique index now rejects."
+```
+
+Rules of thumb:
+
+- **Same `--run` name** across every pass. Discovery (`--branch` / `--pr` / auto) will pick the existing run.
+- **Same `--step` text** across attempts — the rollup keys on step name. Don't rephrase the step on retry.
+- **Bump `--attempt`** by 1 each time you re-run a step (1 → 2 → 3 …). Re-using attempt 1 silently appends a duplicate row at the same level.
+- **Don't refile findings already addressed.** If a finding has been fixed, reply to its feedback (`testito reply --feedback <id>`) or jot a confirmation note — don't jot a new bug describing the resolved state.
+- **`testito end` doesn't close the run.** Append more whenever; the dashboard keeps polling. (`completed_at` may show "completed Xm ago" even mid-pass-2 — that's cosmetic for now.)
+
+When `testito triage` is your first call on a returning session it'll show exactly the deltas to chase: failed/warning steps from prior passes that may have been fixed, plus any human feedback left in between.
+
 ## CLI commands
 
 ```
@@ -469,3 +502,4 @@ The user runs `testito` (or `testito serve`) in a separate terminal. The dashboa
 - **Don't skip `--note`** on failures and warnings.
 - **Don't rename the test mid-session** — pick the `--test "..."` string once and reuse it verbatim for all steps in that scenario.
 - **Don't call `testito end` until you've walked the pre-end checklist** above.
+- **Don't spawn a new run per pass.** A second QA pass after a fix re-uses the original `--run` name and bumps `--attempt`. Names like `<scenario>-pass2`, `<scenario>-retest`, `<scenario>-v2` fragment the history — see "Iterative QA across sessions" above.

@@ -102,24 +102,33 @@
     Plan
     <span class="muted" style="font-size: 0.85rem; font-weight: 400;">({{ plan.len() }} item{% if plan.len() != 1 %}s{% endif %})</span>
   </h2>
-  <div class="card" style="padding: 0.5rem 0.85rem;">
-    <ul class="bare">
+  <div class="card" style="padding: 0.25rem 0.4rem;">
+    <ul class="bare plan-list">
     {% for p in plan %}
       <li class="plan-row">
-        <div class="plan-header">
-          {% match p.verdict %}
-            {% when Some with (s) %}<span class="pill pill-{{ s.as_str() }}">{{ s.label() }}</span>
-            {% when None %}<span class="pill pill-not_run">pending</span>
-          {% endmatch %}
-          <strong class="plan-ordinal">#{{ p.item.ordinal }}</strong>
-          <span class="plan-name">{{ p.item.name }}</span>
-        </div>
-        {% if !p.body_html.is_empty() %}
-        <details class="plan-body">
-          <summary>show steps</summary>
-          <div class="md-content">{{ p.body_html|safe }}</div>
-        </details>
-        {% endif %}
+        {% match p.test_id %}
+          {% when Some with (tid) %}
+            <a class="plan-row-link" href="#test-{{ tid }}">
+              {% match p.verdict %}
+                {% when Some with (s) %}<span class="pill pill-{{ s.as_str() }}">{{ s.label() }}</span>
+                {% when None %}<span class="pill pill-not_run">pending</span>
+              {% endmatch %}
+              <strong class="plan-ordinal">#{{ p.item.ordinal }}</strong>
+              <span class="plan-name">{{ p.item.name }}</span>
+              <span class="plan-arrow" aria-hidden="true">→</span>
+            </a>
+          {% when None %}
+            <div class="plan-row-link plan-row-pending">
+              <span class="pill pill-not_run">pending</span>
+              <strong class="plan-ordinal">#{{ p.item.ordinal }}</strong>
+              <span class="plan-name">{{ p.item.name }}</span>
+            </div>
+        {% endmatch %}
+        {% match p.failure_preview %}
+          {% when Some with (preview) %}
+            <div class="plan-failure-preview">↳ {{ preview }}</div>
+          {% when None %}
+        {% endmatch %}
       </li>
     {% endfor %}
     </ul>
@@ -239,6 +248,7 @@
   <div x-effect="applyTestFilter(q, hide_passing)">
   {% for t in tests %}
     <div class="test-card test-status-{{ t.rollup_str }}"
+         id="test-{{ t.test.id }}"
          data-haystack="{{ t.test.name }}{% for sr in t.steps %} {{ sr.step.name }} {{ sr.step.note }}{% endfor %}"
          x-init="defaultOpen({{ t.test.id }}, '{{ t.rollup_str }}')">
       <div class="test-header" @click="toggle({{ t.test.id }})" style="cursor: pointer;">

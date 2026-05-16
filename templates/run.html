@@ -85,6 +85,24 @@
     }
   });
 
+  // Expand the matching test card when its `#test-<id>` anchor is targeted.
+  // Without this, jumping from a Plan row scrolls to the card's header but
+  // leaves the body collapsed (Alpine `openTests` defaults to closed for
+  // passing tests), which makes the jump feel broken.
+  function openTestCardFromHash() {
+    const m = (location.hash || '').match(/^#test-(\d+)$/);
+    if (!m) return;
+    const id = parseInt(m[1], 10);
+    const scope = document.querySelector('[x-data]');
+    if (!scope || !window.Alpine) return;
+    const data = window.Alpine.$data(scope);
+    data.openTests[id] = true;
+  }
+  window.addEventListener('hashchange', openTestCardFromHash);
+  // Initial load — if the URL already has `#test-N`, open it on page ready
+  // (after Alpine has initialized).
+  document.addEventListener('alpine:initialized', openTestCardFromHash);
+
   // ---- clipboard helpers ----
   function flashCopied(btn) {
     const orig = btn.dataset.origLabel || btn.textContent;

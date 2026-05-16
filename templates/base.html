@@ -83,6 +83,47 @@
   /* alpine cloak */
   [x-cloak] { display: none !important; }
 
+  /* plan section — compact directory of test scenarios with verdict + (on
+     fail/warning) inline "↳ why" preview. Each row links down to the
+     matching test card; pending items render as muted, non-clickable. */
+  .plan-list { padding: 0; margin: 0; }
+  .plan-row {
+    padding: 0;
+    border-bottom: 1px solid rgba(255,255,255,.04);
+  }
+  .plan-row:last-child { border-bottom: none; }
+  .plan-row-link {
+    display: flex;
+    align-items: center;
+    gap: 0.55rem;
+    padding: 0.45rem 0.5rem;
+    color: var(--fg);
+    text-decoration: none;
+    border-radius: 4px;
+  }
+  a.plan-row-link:hover { background: rgba(255,255,255,.04); }
+  a.plan-row-link:hover .plan-arrow { transform: translateX(2px); color: var(--fg); }
+  .plan-row-pending { color: var(--muted); }
+  .plan-ordinal { font-size: 0.85rem; color: var(--muted); font-weight: 600; min-width: 2rem; }
+  .plan-name { flex: 1; font-size: 0.92rem; }
+  .plan-arrow {
+    color: var(--muted);
+    font-size: 0.9rem;
+    transition: transform 0.12s, color 0.12s;
+  }
+  .plan-failure-preview {
+    padding: 0 0.5rem 0.45rem 4.3rem;
+    font-size: 0.82rem;
+    color: var(--muted);
+    line-height: 1.4;
+  }
+  /* Make anchor-jumped test cards visually pop so the reader knows what
+     they clicked into. The :target pseudo-class is set by the browser on
+     the element whose id matches the URL fragment. */
+  .test-card:target {
+    box-shadow: 0 0 0 2px var(--accent);
+  }
+
   /* filter bar */
   .filter-bar { display: flex; gap: 0.5rem; padding: 0.6rem 0.85rem; }
   .filter-bar input[type=text] { flex: 1; padding: 0.4rem 0.6rem; background: #0d1117; color: var(--fg); border: 1px solid var(--border); border-radius: 5px; font-size: 0.85rem; }
